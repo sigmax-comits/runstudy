@@ -2,7 +2,7 @@ name: Verify
 
 on:
   push:
-    branches: [main, fix/timer-sync-build]
+    branches: [main]
   pull_request:
     branches: [main]
 
