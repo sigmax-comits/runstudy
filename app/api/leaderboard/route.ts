@@ -16,29 +16,23 @@ async function kv(command:string[]){
   return json;
 }
 
-function liveSeconds(timer:any){
-  if(!timer?.run)return 0;
-  const started=Number(timer.startedAt),before=Number(timer.elapsedBefore)||0;
-  if(!Number.isFinite(started))return 0;
-  const elapsed=Math.max(0,Math.floor((Date.now()-started)/1000));
-  const value=before+elapsed;
-  return timer.mode==="Stopwatch"?value:Math.min(Number(timer.total)||0,value);
-}
-
 export async function GET(){
   try{
     const x=await kv(["ZREVRANGE","studyx:leaderboard","0","49","WITHSCORES"]);
     const a=x.result||[];
     const names:string[]=[];
     for(let i=0;i<a.length;i+=2)names.push(String(a[i]));
-    const timerValues=names.length?await kv(["MGET",...names.map(username=>"studyx:user:"+username+":timer")] ):null;
+    const timerValues=names.length?await kv(["MGET",...names.map(username=>"studyx:user:"+username+":timer")]):null;
     const rows:{username:string;seconds:number}[]=[];
     for(let i=0;i<a.length;i+=2){
       const username=String(a[i]);
       const stored=Number(a[i+1]||0);
       let seconds=stored;
       const raw=timerValues?.result?.[i/2];
-      if(raw){try{const timer=JSON.parse(raw);seconds=Math.max(seconds,Number(timer.progressBaseSeconds||0)+liveSeconds(timer))}catch{}}
+      if(raw){try{
+        const timer=JSON.parse(raw);
+        seconds=Math.max(seconds,Number(timer.progressBaseSeconds)||0);
+      }catch{}}
       rows.push({username,seconds});
     }
     rows.sort((aa,bb)=>bb.seconds-aa.seconds||aa.username.localeCompare(bb.username));
@@ -53,7 +47,7 @@ export async function GET(){
           if(u.result){
             const d=JSON.parse(u.result),stored=Number(d.progress?.seconds||0),raw=fallbackTimers?.result?.[i];
             let seconds=stored;
-            if(raw){try{const timer=JSON.parse(raw);seconds=Math.max(seconds,Number(timer.progressBaseSeconds||0)+liveSeconds(timer))}catch{}}
+            if(raw){try{const timer=JSON.parse(raw);seconds=Math.max(seconds,Number(timer.progressBaseSeconds)||0)}catch{}}
             if(seconds>0)rows.push({username,seconds});
           }
         }catch{}
