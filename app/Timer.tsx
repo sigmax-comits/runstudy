@@ -20,8 +20,19 @@ function writeTimer(s:TimerState){try{localStorage.setItem(TIMER_KEY,JSON.string
 function removeTimer(){try{localStorage.removeItem(TIMER_KEY)}catch{}}
 function elapsedOf(s:TimerState,now=Date.now()){return Math.max(0,s.elapsedBeforeStart+(s.running&&s.startedAt>0?Math.floor((now-s.startedAt)/1000):0))}
 function remainingOf(s:TimerState,now=Date.now()){return s.mode==="Stopwatch"?elapsedOf(s,now):Math.max(0,s.total-elapsedOf(s,now))}
-function readProgress(){try{return JSON.parse(localStorage.getItem(PROGRESS_KEY)||"{\"seconds\":0,\"sessions\":0,\"daily\":{}}") as {seconds:number;sessions:number;daily:Record<string,number>;pathway?:string;sequence?:number}}catch{return{seconds:0,sessions:0,daily:{}}}}
-function writeProgress(p:{seconds:number;sessions:number;daily:Record<string,number>;pathway?:string;sequence?:number}){try{localStorage.setItem(PROGRESS_KEY,JSON.stringify(p))}catch{}}
+type Progress={seconds:number;sessions:number;daily:Record<string,number>;pathway?:string;sequence?:number;updatedAt?:number};
+function readProgress():Progress{try{return JSON.parse(localStorage.getItem(PROGRESS_KEY)||"{\"seconds\":0,\"sessions\":0,\"daily\":{}}") as Progress}catch{return{seconds:0,sessions:0,daily:{}}}}
+function writeProgress(p:Progress){try{localStorage.setItem(PROGRESS_KEY,JSON.stringify(p))}catch{}}
+function mergeProgress(local:Progress,cloud:any):Progress{
+  const c=cloud&&typeof cloud==="object"?cloud:{};
+  const lSeconds=Math.max(0,Number(local.seconds)||0),cSeconds=Math.max(0,Number(c.seconds)||0);
+  const lAt=Number(local.updatedAt)||0,cAt=Number(c.updatedAt)||0;
+  const cloudIsNewer=cAt>lAt||(cAt===lAt&&cSeconds>=lSeconds);
+  const winner=cloudIsNewer?c:local;
+  const daily:Record<string,number>={...(local.daily||{})};
+  for(const [day,value] of Object.entries((c.daily||{}) as Record<string,number>))daily[day]=Math.max(Number(daily[day]||0),Number(value)||0);
+  return {...local,...winner,seconds:Math.max(lSeconds,cSeconds),sessions:Math.max(Number(local.sessions)||0,Number(c.sessions)||0),daily,updatedAt:Math.max(lAt,cAt)};
+}
 
 export default function Timer(){
  const [state,setState]=useState<TimerState>(()=>readTimer()||defaultTimer());
@@ -39,7 +50,7 @@ export default function Timer(){
    const delta=Math.max(0,toElapsed-fromElapsed);if(!delta)return;
    const p=readProgress();p.daily=p.daily||{};const day=new Date(at).toISOString().slice(0,10);const used=p.daily[day]||0;const add=Math.min(delta,Math.max(0,20*3600-used));
    if(add<=0)return;
-   p.seconds=(p.seconds||0)+add;p.daily[day]=used+add;writeProgress(p);
+   p.seconds=(p.seconds||0)+add;p.daily[day]=used+add;p.updatedAt=at;writeProgress(p);
  },[]);
 
  const persistRunning=useCallback((current:TimerState,now=Date.now(),updateReact=true)=>{
@@ -54,8 +65,10 @@ export default function Timer(){
    try{
      const auth=await fetch("/api/auth",{cache:"no-store"}).then(r=>r.json());if(!auth.loggedIn)return;
      const activeTimer=timer?{run:timer.running,mode:timer.mode,total:timer.total,startedAt:timer.startedAt||Date.now(),elapsedBefore:timer.elapsedBeforeStart}:null;
-     const r=await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({activeTimer,activeTimerExpectedVersion:cloudVersionRef.current})});
+     const progress=readProgress();
+     const r=await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({activeTimer,activeTimerExpectedVersion:cloudVersionRef.current,progress})});
      const x=await r.json().catch(()=>null);if(Number.isFinite(Number(x?.timerVersion)))cloudVersionRef.current=Number(x.timerVersion);
+     if(x?.data?.progress)writeProgress(mergeProgress(progress,x.data.progress));
    }catch{}
  },[]);
 
@@ -95,7 +108,7 @@ export default function Timer(){
    const onVisibility=()=>{const current=stateRef.current;if(!current.running)return;if(document.visibilityState==="hidden"){const saved=persistRunning(current,Date.now(),true);void syncCloud(saved)}else{const now=Date.now();const elapsed=elapsedOf(stateRef.current,now);applyProgress(lastProgressElapsedRef.current,elapsed,now);lastProgressElapsedRef.current=elapsed;setLeft(remainingOf(stateRef.current,now));}};
    const onPageHide=()=>{const current=stateRef.current;if(current.running){const saved=persistRunning(current,Date.now(),false);void syncCloud(saved)}};
    document.addEventListener("visibilitychange",onVisibility);window.addEventListener("pagehide",onPageHide);
-   return()=>{window.clearInterval(id);document.removeEventListener("visibilitychange",onVisibility);window.removeEventListener("pagehide",onPageHide);const current=stateRef.current;if(current.running)persistRunning(current,Date.now(),false)};
+   return()=>{window.clearInterval(id);document.removeEventListener("visibilitychange",onVisibility);window.removeEventListener("pagehide",onPageHide);const current=stateRef.current;if(current.running){const saved=persistRunning(current,Date.now(),false);void syncCloud(saved)}};
  },[applyProgress,persistRunning,hydrated,syncCloud]);
 
  const pauseTimer=useCallback(()=>{const current=stateRef.current;if(!current.running)return;const now=Date.now();const elapsed=elapsedOf(current,now);applyProgress(lastProgressElapsedRef.current,elapsed,now);lastProgressElapsedRef.current=elapsed;const paused={...current,running:false,elapsedBeforeStart:elapsed};stateRef.current=paused;setState(paused);setLeft(remainingOf(paused));writeTimer(paused);void syncCloud(paused)},[applyProgress,syncCloud]);
