@@ -23,38 +23,40 @@ async function kv(command:string[]){
 
 const TIMER_VERSION_SCRIPT=`
 local current=tonumber(redis.call('GET',KEYS[2]) or '0')
-local incoming=tonumber(ARGV[2]) or 0
-if incoming < current then return 0 end
+local expected=tonumber(ARGV[2])
+if expected == nil then return {0,current} end
+if expected ~= current then return {0,current} end
+local next=current+1
 redis.call('SET',KEYS[1],ARGV[1])
-redis.call('SET',KEYS[2],ARGV[2])
-return 1
+redis.call('SET',KEYS[2],tostring(next))
+return {1,next}
 `;
 
-async function writeTimer(key:string,timer:any,version:number){
-  const result=await kv(["EVAL",TIMER_VERSION_SCRIPT,"2",key,key+":version",JSON.stringify(timer),String(version)]);
-  return Number(result.result||0)===1;
+async function writeTimer(key:string,timer:any,expectedVersion:number){
+  const result=await kv(["EVAL",TIMER_VERSION_SCRIPT,"2",key,key+":version",JSON.stringify(timer),String(expectedVersion)]);
+  const values=Array.isArray(result.result)?result.result.map(Number):[0,0];
+  return {accepted:values[0]===1,version:Number.isFinite(values[1])?values[1]:0};
 }
 
-function timerVersion(timer:any,requested:number|undefined){
-  if(Number.isFinite(requested))return Number(requested);
-  if(timer&&typeof timer==="object"){
-    const started=Number(timer.startedAt)||0;
-    const elapsed=Number(timer.elapsedBefore)||0;
-    return started*1000+elapsed*1000;
-  }
-  return Date.now();
+async function readJson(key:string,fallback:any){
+  const value=await kv(["GET",key]);
+  if(!value.result)return fallback;
+  try{return JSON.parse(value.result)}catch{return fallback}
 }
 
 export async function GET(req:NextRequest){
   const u=current(req);if(!u)return NextResponse.json({error:"Not logged in"},{status:401});
   try{
     const key="studyx:user:"+u;
-    const x=await kv(["GET",key]);
-    let data:any={progress:{},tasks:[],activeTimer:null};
-    try{if(x.result)data={...data,...JSON.parse(x.result)}}catch{}
+    const legacy=await readJson(key,{progress:{},tasks:[]});
+    const progress=await readJson(key+":progress",legacy.progress||{});
+    const tasks=await readJson(key+":tasks",Array.isArray(legacy.tasks)?legacy.tasks:[]);
     const timer=await kv(["GET",key+":timer"]);
-    if(timer.result){try{data.activeTimer=JSON.parse(timer.result)}catch{}}
-    return NextResponse.json({username:u,data});
+    const versionRaw=await kv(["GET",key+":timer:version"]);
+    let activeTimer:any=null;
+    if(timer.result){try{activeTimer=JSON.parse(timer.result)}catch{}}
+    const timerVersion=Number(versionRaw.result||0)||0;
+    return NextResponse.json({username:u,data:{progress,tasks,activeTimer},timerVersion});
   }catch{return NextResponse.json({error:"Cloud storage is not configured"},{status:503})}
 }
 
@@ -63,33 +65,37 @@ export async function POST(req:NextRequest){
   try{
     const body=await req.json();
     const key="studyx:user:"+u;
-    const existingRaw=await kv(["GET",key]);
-    let existing:any={progress:{},tasks:[]};
-    try{if(existingRaw.result)existing=JSON.parse(existingRaw.result)}catch{}
-
+    const legacy=await readJson(key,{progress:{},tasks:[]});
+    const currentProgress=await readJson(key+":progress",legacy.progress||{});
+    const currentTasks=await readJson(key+":tasks",Array.isArray(legacy.tasks)?legacy.tasks:[]);
     const hasProgress=body.progress&&typeof body.progress==="object"&&!Array.isArray(body.progress);
     const hasTasks=Array.isArray(body.tasks);
     const hasActiveTimer=Object.prototype.hasOwnProperty.call(body,"activeTimer");
-    const data={
-      progress:hasProgress?{...(existing.progress||{}),...body.progress}:(existing.progress||{}),
-      tasks:hasTasks?body.tasks:(Array.isArray(existing.tasks)?existing.tasks:[])
-    };
+    const progress=hasProgress?{...currentProgress,...body.progress}:currentProgress;
+    const tasks=hasTasks?body.tasks:currentTasks;
 
-    await kv(["SET",key,JSON.stringify(data)]);
+    if(hasProgress)await kv(["SET",key+":progress",JSON.stringify(progress)]);
+    if(hasTasks)await kv(["SET",key+":tasks",JSON.stringify(tasks)]);
+    if(hasProgress||hasTasks)await kv(["SET",key,JSON.stringify({progress,tasks})]);
 
     let timerAccepted=true;
-    let activeTimer:any=undefined;
+    let activeTimer:any;
+    let timerVersion=Number((await kv(["GET",key+":timer:version"])).result||0)||0;
     if(hasActiveTimer){
-      const version=timerVersion(body.activeTimer,Number(body.activeTimerUpdatedAt));
-      activeTimer=body.activeTimer;
-      timerAccepted=await writeTimer(key+":timer",activeTimer,version);
+      const requested=Number(body.activeTimerExpectedVersion);
+      const expected=Number.isFinite(requested)?requested:(timerVersion===0?0:-1);
+      const result=await writeTimer(key+":timer",body.activeTimer,expected);
+      timerAccepted=result.accepted;
+      timerVersion=result.version;
+      const timer=await kv(["GET",key+":timer"]);
+      if(timer.result){try{activeTimer=JSON.parse(timer.result)}catch{activeTimer=null}}else activeTimer=null;
     }else{
       const timer=await kv(["GET",key+":timer"]);
       if(timer.result){try{activeTimer=JSON.parse(timer.result)}catch{activeTimer=null}}
     }
 
-    const responseData={...data,activeTimer:activeTimer===undefined?(existing.activeTimer??null):activeTimer};
+    const responseData={progress,tasks,activeTimer};
     await kv(["ZADD","studyx:leaderboard","GT",String(responseData.progress?.seconds||0),u]);
-    return NextResponse.json({ok:true,accepted:timerAccepted,data:responseData});
+    return NextResponse.json({ok:true,accepted:timerAccepted,data:responseData,timerVersion});
   }catch{return NextResponse.json({error:"Cloud storage is not configured"},{status:503})}
 }
