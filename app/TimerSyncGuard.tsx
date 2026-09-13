@@ -26,6 +26,7 @@ function checkpointTimer(now=Date.now()){
 function readPaused():StoredTimer|null{try{const raw=localStorage.getItem(PAUSED_KEY);if(!raw)return null;const t=JSON.parse(raw);if(!t||t.run!==false)return null;const total=Number(t.total),elapsedBefore=Number(t.elapsedBefore)||0;if(!Number.isFinite(total)||total<0||elapsedBefore<0)return null;return {...t,mode:t.mode||"Timer",total,startedAt:0,elapsedBefore,progressBaseSeconds:Number.isFinite(Number(t.progressBaseSeconds))?Number(t.progressBaseSeconds):undefined}}catch{return null}}
 function writePaused(t:StoredTimer){try{localStorage.setItem(PAUSED_KEY,JSON.stringify({...t,run:false,startedAt:0}))}catch{}}
 function clearPaused(){try{localStorage.removeItem(PAUSED_KEY)}catch{}}
+function isPaused(){return !!readPaused()}
 
 export default function TimerSyncGuard(){
   useLayoutEffect(()=>{
@@ -53,10 +54,7 @@ export default function TimerSyncGuard(){
     Storage.prototype.removeItem=function(key:string){
       if(this===sessionStorage&&key===TIMER_KEY&&pauseRequested&&!handlingRemoval){
         handlingRemoval=true;
-        try{
-          const current=readTimer();
-          if(current)writePaused(current);
-        }catch{}
+        try{const current=readTimer();if(current)writePaused(current)}catch{}
         pauseRequested=false;
         try{originalRemoveItem.call(this,key)}catch{}
         try{localStorage.removeItem(TIMER_KEY)}catch{}
@@ -73,9 +71,8 @@ export default function TimerSyncGuard(){
       try{
         const p=readPaused();
         if(p){
-          const restored={...p,run:true,startedAt:Date.now()};
           restoring=true;
-          writeTimer(restored);
+          writeTimer({...p,run:true,startedAt:Date.now()});
         }
       }catch{}
     }
@@ -87,7 +84,7 @@ export default function TimerSyncGuard(){
         restoring=false;
         start.click();
       }
-    },0);
+    },50);
 
     return()=>{
       window.clearTimeout(id);
@@ -102,6 +99,7 @@ export default function TimerSyncGuard(){
     let lastCloudSync=0;
     const isSync=(input:RequestInfo|URL)=>{const url=typeof input==="string"?input:input instanceof Request?input.url:input.toString();return new URL(url,window.location.href).pathname==="/api/sync"};
     const syncTimer=async(forceCloud=false)=>{
+      if(isPaused())return;
       const t=checkpointTimer();if(!t)return;
       if(!forceCloud&&Date.now()-lastCloudSync<CLOUD_MS)return;
       lastCloudSync=Date.now();
@@ -128,7 +126,12 @@ export default function TimerSyncGuard(){
           const body=JSON.parse(init.body);
           if(Object.prototype.hasOwnProperty.call(body,"activeTimer")){
             timerMutation=true;
-            body.activeTimerExpectedVersion=requestExpected;
+            if(isPaused()){
+              body.activeTimer=null;
+              body.activeTimerExpectedVersion=requestExpected;
+            }else{
+              body.activeTimerExpectedVersion=requestExpected;
+            }
             nextInit={...init,body:JSON.stringify(body)};
           }
         }
@@ -138,6 +141,10 @@ export default function TimerSyncGuard(){
       try{
         const data=await response.clone().json();
         if(Number.isFinite(Number(data.timerVersion)))writeVersion(Number(data.timerVersion));
+        if(isPaused()&&(!init?.method||init.method.toUpperCase()==="GET")){
+          const safeData={...data,data:{...(data.data||{}),activeTimer:null}};
+          return new Response(JSON.stringify(safeData),{status:response.status,statusText:response.statusText,headers:{"Content-Type":"application/json"}});
+        }
         if(timerMutation&&!data.accepted&&Number(data.timerVersion)>requestExpected&&!disposed){
           if(Object.prototype.hasOwnProperty.call(data.data||{},"activeTimer")){
             try{if(data.data.activeTimer===null)removeTimer();else writeTimer(data.data.activeTimer)}catch{}
@@ -146,13 +153,13 @@ export default function TimerSyncGuard(){
       }catch{}
       return response;
     };
-    const onStorage=(e:StorageEvent)=>{if(e.key!==VERSION_KEY)return;void originalFetch("/api/sync",{cache:"no-store"}).then(r=>r.json()).then(x=>{if(Number.isFinite(Number(x.timerVersion)))writeVersion(Number(x.timerVersion));if(x.data&&Object.prototype.hasOwnProperty.call(x.data,"activeTimer")){try{if(x.data.activeTimer===null)removeTimer();else writeTimer(x.data.activeTimer)}catch{}}}).catch(()=>{})};
+    const onStorage=(e:StorageEvent)=>{if(e.key!==VERSION_KEY||isPaused())return;void originalFetch("/api/sync",{cache:"no-store"}).then(r=>r.json()).then(x=>{if(Number.isFinite(Number(x.timerVersion)))writeVersion(Number(x.timerVersion));if(x.data&&Object.prototype.hasOwnProperty.call(x.data,"activeTimer")){try{if(x.data.activeTimer===null)removeTimer();else writeTimer(x.data.activeTimer)}catch{}}}).catch(()=>{})};
     const onLogout=()=>{removeTimer();clearPaused();try{localStorage.removeItem(VERSION_KEY)}catch{}};
     window.addEventListener("storage",onStorage);
     window.addEventListener("studyx-logout",onLogout);
     const id=window.setInterval(()=>{void syncTimer()},CHECKPOINT_MS);
-    void syncTimer(true);
-    return()=>{disposed=true;window.clearInterval(id);window.fetch=original;window.removeEventListener("storage",onStorage);window.removeEventListener("studyx-logout",onLogout)};
+    const initial=window.setTimeout(()=>{void syncTimer(true)},150);
+    return()=>{disposed=true;window.clearInterval(id);window.clearTimeout(initial);window.fetch=original;window.removeEventListener("storage",onStorage);window.removeEventListener("studyx-logout",onLogout)};
   },[]);
   return null;
 }
