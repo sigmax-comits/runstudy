@@ -42,16 +42,17 @@ export default function Timer(){
    p.seconds=(p.seconds||0)+add;p.daily[day]=used+add;writeProgress(p);
  },[]);
 
- const checkpoint=useCallback((now=Date.now())=>{
-   const current=stateRef.current;if(!current.running)return current;
+ const persistRunning=useCallback((current:TimerState,now=Date.now(),updateReact=true)=>{
+   if(!current.running)return current;
    const elapsed=elapsedOf(current,now);const next={...current,startedAt:now,elapsedBeforeStart:elapsed};
-   applyProgress(lastProgressElapsedRef.current,elapsed,now);lastProgressElapsedRef.current=elapsed;writeTimer(next);stateRef.current=next;setState(next);setLeft(remainingOf(next,now));return next;
+   applyProgress(lastProgressElapsedRef.current,elapsed,now);lastProgressElapsedRef.current=elapsed;writeTimer(next);stateRef.current=next;
+   if(updateReact){setState(next);setLeft(remainingOf(next,now))}
+   return next;
  },[applyProgress]);
 
  const syncCloud=useCallback(async(timer:TimerState|null)=>{
    try{
      const auth=await fetch("/api/auth",{cache:"no-store"}).then(r=>r.json());if(!auth.loggedIn)return;
-     if(!Number.isFinite(cloudVersionRef.current))cloudVersionRef.current=0;
      const activeTimer=timer?{run:timer.running,mode:timer.mode,total:timer.total,startedAt:timer.startedAt||Date.now(),elapsedBefore:timer.elapsedBeforeStart}:null;
      const r=await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({activeTimer,activeTimerExpectedVersion:cloudVersionRef.current})});
      const x=await r.json().catch(()=>null);if(Number.isFinite(Number(x?.timerVersion)))cloudVersionRef.current=Number(x.timerVersion);
@@ -64,7 +65,7 @@ export default function Timer(){
    if(local){
      const now=Date.now();const elapsed=elapsedOf(local,now);
      if(local.running&&local.mode!=="Stopwatch"&&elapsed>=local.total){
-       applyProgress(lastProgressElapsedRef.current,local.total,now);const p=readProgress();p.sessions=(p.sessions||0)+1;writeProgress(p);removeTimer();const reset={...local,running:false,startedAt:local.startedAt,elapsedBeforeStart:local.total};setState(reset);setLeft(0);void syncCloud(null);
+       const p=readProgress();p.sessions=(p.sessions||0)+1;writeProgress(p);removeTimer();const reset={...local,running:false,startedAt:local.startedAt,elapsedBeforeStart:local.total};setState(reset);setLeft(0);void syncCloud(null);
      }else{setState(local);setLeft(remainingOf(local,now));lastProgressElapsedRef.current=local.elapsedBeforeStart;}
      setHydrated(true);return;
    }
@@ -76,7 +77,7 @@ export default function Timer(){
      setHydrated(true);
    };
    void loadCloud();
- },[applyProgress,syncCloud]);
+ },[syncCloud]);
 
  useEffect(()=>{if(!hydrated)return;try{localStorage.setItem(TASKS_KEY,JSON.stringify(tasks))}catch{}},[tasks,hydrated]);
 
@@ -88,24 +89,23 @@ export default function Timer(){
      if(current.mode!=="Stopwatch"&&elapsed>=current.total){
        const p=readProgress();p.sessions=(p.sessions||0)+1;writeProgress(p);removeTimer();const finished={...current,running:false,elapsedBeforeStart:current.total};stateRef.current=finished;setState(finished);setLeft(0);void syncCloud(null);return;
      }
-     if(now-lastCloudSyncRef.current>=5000){lastCloudSyncRef.current=now;const saved={...current,startedAt:now,elapsedBeforeStart:elapsed};writeTimer(saved);stateRef.current=saved;void syncCloud(saved);}
-     else if(now%1000<300)writeTimer({...current,startedAt:current.startedAt,elapsedBeforeStart:current.elapsedBeforeStart});
+     if(now-lastCloudSyncRef.current>=5000){lastCloudSyncRef.current=now;persistRunning(current,now,true);void syncCloud(stateRef.current)}
    };
    tick();const id=window.setInterval(tick,250);
-   const onVisibility=()=>{if(document.visibilityState==="hidden"){const current=stateRef.current;if(current.running){const saved=checkpoint();void syncCloud(saved)}}else{const current=stateRef.current;if(current.running){const now=Date.now();const elapsed=elapsedOf(current,now);applyProgress(lastProgressElapsedRef.current,elapsed,now);lastProgressElapsedRef.current=elapsed;setLeft(remainingOf(current,now));}}};
-   const onPageHide=()=>{const current=stateRef.current;if(current.running){const saved=checkpoint();void syncCloud(saved)}};
+   const onVisibility=()=>{const current=stateRef.current;if(!current.running)return;if(document.visibilityState==="hidden"){const saved=persistRunning(current,Date.now(),true);void syncCloud(saved)}else{const now=Date.now();const elapsed=elapsedOf(stateRef.current,now);applyProgress(lastProgressElapsedRef.current,elapsed,now);lastProgressElapsedRef.current=elapsed;setLeft(remainingOf(stateRef.current,now));}};
+   const onPageHide=()=>{const current=stateRef.current;if(current.running){const saved=persistRunning(current,Date.now(),false);void syncCloud(saved)}};
    document.addEventListener("visibilitychange",onVisibility);window.addEventListener("pagehide",onPageHide);
-   return()=>{window.clearInterval(id);document.removeEventListener("visibilitychange",onVisibility);window.removeEventListener("pagehide",onPageHide);const current=stateRef.current;if(current.running)checkpoint()};
- },[applyProgress,checkpoint,hydrated,syncCloud]);
+   return()=>{window.clearInterval(id);document.removeEventListener("visibilitychange",onVisibility);window.removeEventListener("pagehide",onPageHide);const current=stateRef.current;if(current.running)persistRunning(current,Date.now(),false)};
+ },[applyProgress,persistRunning,hydrated,syncCloud]);
 
  const pauseTimer=useCallback(()=>{const current=stateRef.current;if(!current.running)return;const now=Date.now();const elapsed=elapsedOf(current,now);applyProgress(lastProgressElapsedRef.current,elapsed,now);lastProgressElapsedRef.current=elapsed;const paused={...current,running:false,elapsedBeforeStart:elapsed};stateRef.current=paused;setState(paused);setLeft(remainingOf(paused));writeTimer(paused);void syncCloud(paused)},[applyProgress,syncCloud]);
  const resumeTimer=useCallback(()=>{const current=stateRef.current;if(current.running)return;const resumed={...current,running:true,startedAt:Date.now()};stateRef.current=resumed;setState(resumed);writeTimer(resumed);void syncCloud(resumed)},[syncCloud]);
  const resetTimer=useCallback(()=>{const current=stateRef.current;removeTimer();const reset={...current,running:false,startedAt:0,elapsedBeforeStart:0};stateRef.current=reset;setState(reset);setLeft(reset.mode==="Stopwatch"?0:reset.total);lastProgressElapsedRef.current=0;void syncCloud(null)},[syncCloud]);
- const selectMode=useCallback((m:Mode)=>{const current=stateRef.current;if(current.running)pauseTimer();const total=m==="Pomodoro"?1500:m==="Focus"?3000:m==="Stopwatch"?0:1500;const next={mode:m,total,running:false,startedAt:0,elapsedBeforeStart:0};writeTimer(next);stateRef.current=next;setState(next);setLeft(0);lastProgressElapsedRef.current=0},[pauseTimer]);
+ const selectMode=useCallback((m:Mode)=>{if(stateRef.current.running)pauseTimer();const total=m==="Pomodoro"?1500:m==="Focus"?3000:m==="Stopwatch"?0:1500;const next={mode:m,total,running:false,startedAt:0,elapsedBeforeStart:0};writeTimer(next);stateRef.current=next;setState(next);setLeft(0);lastProgressElapsedRef.current=0},[pauseTimer]);
  const setPreset=useCallback((minutes:number)=>{if(stateRef.current.running)pauseTimer();const next={mode:"Timer" as Mode,total:minutes*60,running:false,startedAt:0,elapsedBeforeStart:0};writeTimer(next);stateRef.current=next;setState(next);setLeft(next.total);lastProgressElapsedRef.current=0},[pauseTimer]);
  const applyCustom=useCallback(()=>{const n=Math.min(20*3600,(+custom.h||0)*3600+(+custom.m||0)*60+(+custom.s||0));if(!n)return;if(stateRef.current.running)pauseTimer();const next={mode:"Timer" as Mode,total:n,running:false,startedAt:0,elapsedBeforeStart:0};writeTimer(next);stateRef.current=next;setState(next);setLeft(n);lastProgressElapsedRef.current=0},[custom,pauseTimer]);
  const addTask=()=>{const v=taskText.trim();if(!v)return;setTasks(t=>[...t,{id:Date.now(),text:v,done:false}]);setTaskText("")};
- const saveNow=()=>{const current=stateRef.current;if(current.running)checkpoint();const p=readProgress();void syncCloud(stateRef.current);void (async()=>{try{const auth=await fetch("/api/auth",{cache:"no-store"}).then(r=>r.json());if(!auth.loggedIn)return;await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({progress:p,tasks})})}catch{}})()};
+ const saveNow=()=>{const current=stateRef.current;if(current.running)persistRunning(current,Date.now(),true);const p=readProgress();void syncCloud(stateRef.current);void (async()=>{try{const auth=await fetch("/api/auth",{cache:"no-store"}).then(r=>r.json());if(!auth.loggedIn)return;await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({progress:p,tasks})})}catch{}})()};
  const display=remainingOf(state,Date.now());const pct=state.mode==="Stopwatch"?100:state.total?((state.total-display)/state.total)*100:0;const done=tasks.filter(t=>t.done).length;
  return <main className="timer-page">
   <div className="timer-intro"><span className="section-kicker">FOCUS / 01</span><h1>Make time for what matters.</h1><p>A quiet workspace for deliberate study.</p></div>
