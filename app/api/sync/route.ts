@@ -32,6 +32,63 @@ redis.call('SET',KEYS[2],tostring(next))
 return {1,next}
 `;
 
+// Atomically read-merge-write the progress blob inside Redis itself.
+// This closes a race condition where two near-simultaneous sync requests
+// (the periodic 5s auto-sync and a manual/pause sync) could each read the
+// same stale "current" progress, and whichever one's SET happened to land
+// last would silently overwrite a larger, more up-to-date seconds value
+// with a smaller one. Running the whole read+merge+write as one Lua script
+// makes it atomic on the Redis server, so this can no longer happen.
+const PROGRESS_MERGE_SCRIPT=`
+local raw=redis.call('GET',KEYS[1])
+local cur={}
+if raw then
+  local ok,decoded=pcall(cjson.decode,raw)
+  if ok and type(decoded)=='table' then cur=decoded end
+end
+local ok2,incoming=pcall(cjson.decode,ARGV[1])
+if not ok2 or type(incoming)~='table' then incoming={} end
+
+local curSeconds=tonumber(cur.seconds) or 0
+local incSeconds=tonumber(incoming.seconds) or 0
+local curAt=tonumber(cur.updatedAt) or 0
+local incAt=tonumber(incoming.updatedAt) or 0
+
+local winner
+if incAt>curAt or (incAt==curAt and incSeconds>=curSeconds) then winner=incoming else winner=cur end
+
+local merged={}
+for k,v in pairs(cur) do merged[k]=v end
+for k,v in pairs(winner) do merged[k]=v end
+
+merged.seconds=math.max(curSeconds,incSeconds)
+merged.sessions=math.max(tonumber(cur.sessions) or 0,tonumber(incoming.sessions) or 0)
+merged.updatedAt=math.max(curAt,incAt)
+
+local daily={}
+if type(cur.daily)=='table' then
+  for k,v in pairs(cur.daily) do daily[k]=tonumber(v) or 0 end
+end
+if type(incoming.daily)=='table' then
+  for k,v in pairs(incoming.daily) do
+    local cv=tonumber(daily[k]) or 0
+    local iv=tonumber(v) or 0
+    daily[k]=math.max(cv,iv)
+  end
+end
+
+merged.daily=daily
+
+local encoded=cjson.encode(merged)
+redis.call('SET',KEYS[1],encoded)
+return encoded
+`;
+
+async function mergeProgressAtomic(key:string,incoming:any):Promise<any>{
+  const result=await kv(["EVAL",PROGRESS_MERGE_SCRIPT,"1",key,JSON.stringify(incoming)]);
+  try{return JSON.parse(String(result.result))}catch{return incoming}
+}
+
 async function writeTimer(key:string,timer:any,expectedVersion:number){
   const result=await kv(["EVAL",TIMER_VERSION_SCRIPT,"2",key,key+":version",JSON.stringify(timer),String(expectedVersion)]);
   const values=Array.isArray(result.result)?result.result.map(Number):[0,0];
@@ -42,34 +99,6 @@ async function readJson(key:string,fallback:any){
   const value=await kv(["GET",key]);
   if(!value.result)return fallback;
   try{return JSON.parse(value.result)}catch{return fallback}
-}
-
-function progressTimestamp(value:any){
-  const n=Number(value?.updatedAt);
-  return Number.isFinite(n)&&n>0?n:0;
-}
-
-function mergeProgress(currentProgress:any,incoming:any){
-  const current=currentProgress&&typeof currentProgress==="object"?currentProgress:{};
-  const next=incoming&&typeof incoming==="object"?incoming:{};
-  const currentSeconds=Math.max(0,Number(current.seconds)||0);
-  const incomingSeconds=Math.max(0,Number(next.seconds)||0);
-  const currentAt=progressTimestamp(current);
-  const incomingAt=progressTimestamp(next);
-  const incomingIsNewer=incomingAt>currentAt||(incomingAt===currentAt&&incomingSeconds>=currentSeconds);
-  const winner=incomingIsNewer?next:current;
-  const dailyCurrent=current.daily&&typeof current.daily==="object"?current.daily:{};
-  const dailyIncoming=next.daily&&typeof next.daily==="object"?next.daily:{};
-  const daily={...dailyCurrent};
-  for(const [day,value] of Object.entries(dailyIncoming))daily[day]=Math.max(Number(daily[day]||0),Number(value)||0);
-  return {
-    ...current,
-    ...winner,
-    seconds:Math.max(currentSeconds,incomingSeconds),
-    sessions:Math.max(Number(current.sessions||0),Number(next.sessions||0)),
-    daily,
-    updatedAt:Math.max(currentAt,incomingAt)
-  };
 }
 
 export async function GET(req:NextRequest){
@@ -99,10 +128,12 @@ export async function POST(req:NextRequest){
     const hasProgress=body.progress&&typeof body.progress==="object"&&!Array.isArray(body.progress);
     const hasTasks=Array.isArray(body.tasks);
     const hasActiveTimer=Object.prototype.hasOwnProperty.call(body,"activeTimer");
-    const progress=hasProgress?mergeProgress(currentProgress,body.progress):currentProgress;
+    // Progress is merged atomically on the Redis side (see PROGRESS_MERGE_SCRIPT)
+    // instead of read-here-then-write-later, so overlapping requests can never
+    // clobber each other and seconds can never regress.
+    const progress=hasProgress?await mergeProgressAtomic(key+":progress",body.progress):currentProgress;
     const tasks=hasTasks?body.tasks:currentTasks;
 
-    if(hasProgress)await kv(["SET",key+":progress",JSON.stringify(progress)]);
     if(hasTasks)await kv(["SET",key+":tasks",JSON.stringify(tasks)]);
     if(hasProgress||hasTasks)await kv(["SET",key,JSON.stringify({progress,tasks})]);
 
