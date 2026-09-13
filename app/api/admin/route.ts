@@ -2,7 +2,7 @@ import {NextRequest,NextResponse} from "next/server";
 import crypto from "crypto";
 
 function secret(){return process.env.STUDY_X_AUTH_SECRET||"dev-only-change-me"}
-function adminPassword(){return process.env.STUDY_X_ADMIN_PASSWORD||""}
+function adminPassword(){return "8291"}
 function sign(v:string){return crypto.createHmac("sha256",secret()).update(v).digest("hex")}
 function makeAdminToken(){const p=Buffer.from(JSON.stringify({admin:true,exp:Date.now()+86400000})).toString("base64url");return p+"."+sign(p)}
 function isAdmin(req:NextRequest){const t=req.cookies.get("study_x_admin")?.value;if(!t)return false;const [p,s]=t.split(".");if(!p||s!==sign(p))return false;try{const x=JSON.parse(Buffer.from(p,"base64url").toString());return x.admin===true&&x.exp>Date.now()}catch{return false}}
@@ -10,7 +10,7 @@ function redisConfig(){const url=process.env.UPSTASH_REDIS_REST_URL||process.env
 async function kv(command:string[]){const {url,token}=redisConfig();const r=await fetch(url,{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify(command),cache:"no-store"});if(!r.ok)throw new Error("Storage request failed");const json=await r.json();if(json.error)throw new Error(String(json.error));return json}
 async function readJson(key:string,fallback:any){const r=await kv(["GET",key]);if(!r.result)return fallback;try{return JSON.parse(r.result)}catch{return fallback}}
 
-export async function POST(req:NextRequest){try{const body=await req.json();if(!adminPassword()||String(body?.password||"")!==adminPassword())return NextResponse.json({error:"Invalid admin password"},{status:401});const res=NextResponse.json({ok:true});res.cookies.set("study_x_admin",makeAdminToken(),{httpOnly:true,secure:true,sameSite:"strict",path:"/",maxAge:86400});return res}catch{return NextResponse.json({error:"Admin login failed"},{status:400})}}
+export async function POST(req:NextRequest){try{const body=await req.json();if(String(body?.password||"")!==adminPassword())return NextResponse.json({error:"Invalid admin password"},{status:401});const res=NextResponse.json({ok:true});res.cookies.set("study_x_admin",makeAdminToken(),{httpOnly:true,secure:true,sameSite:"strict",path:"/",maxAge:86400});return res}catch{return NextResponse.json({error:"Admin login failed"},{status:400})}}
 
 export async function GET(req:NextRequest){if(!isAdmin(req))return NextResponse.json({error:"Unauthorized"},{status:401});try{let cursor="0";const users=new Map<string,any>();do{const r=await kv(["SCAN",cursor,"MATCH","studyx:user:*:progress","COUNT","100"]);const result=Array.isArray(r.result)?r.result:["0",[]];cursor=String(result[0]||"0");for(const key of (Array.isArray(result[1])?result[1]:[])){const k=String(key),prefix="studyx:user:",suffix=":progress";if(!k.startsWith(prefix)||!k.endsWith(suffix))continue;const username=k.slice(prefix.length,-suffix.length);if(username&&!users.has(username))users.set(username,await readJson(k,{seconds:0,sessions:0,daily:{}}))}}while(cursor!=="0");const data=Array.from(users.entries()).map(([username,progress])=>({username,progress})).sort((a,b)=>a.username.localeCompare(b.username));return NextResponse.json({users:data})}catch{return NextResponse.json({error:"Cloud storage is not configured"},{status:503})}}
 
