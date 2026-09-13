@@ -38,9 +38,16 @@ export default function TimerSyncGuard(){
     let restoring=false;
     let pauseRequested=false;
     let handlingRemoval=false;
+    let allowTimerRemoval=false;
     let lastCloudSync=0;
     const originalRemoveItem=Storage.prototype.removeItem;
     const originalFetch=window.fetch.bind(window);
+    const removalResetTimers:number[]=[];
+
+    const permitTimerRemoval=()=>{
+      allowTimerRemoval=true;
+      removalResetTimers.push(window.setTimeout(()=>{allowTimerRemoval=false},1500));
+    };
 
     const onTimerControl=(event:Event)=>{
       const target=event.target as HTMLElement|null;
@@ -54,18 +61,28 @@ export default function TimerSyncGuard(){
         }else clearPaused();
         return;
       }
-      if(button.classList.contains("round-control")||button.classList.contains("save-control")||button.closest(".mode-tabs")||button.closest(".preset-stack")||button.closest(".custom-box"))clearPaused();
+      if(button.classList.contains("round-control")||button.classList.contains("save-control")||button.closest(".mode-tabs")||button.closest(".preset-stack")||button.closest(".custom-box")){
+        clearPaused();
+        permitTimerRemoval();
+      }
     };
 
     Storage.prototype.removeItem=function(key:string){
-      if(this===sessionStorage&&key===TIMER_KEY&&pauseRequested&&!handlingRemoval){
-        handlingRemoval=true;
-        try{const current=readTimer();if(current)writePaused(current)}catch{}
-        pauseRequested=false;
-        try{originalRemoveItem.call(this,key)}catch{}
-        try{localStorage.removeItem(TIMER_KEY)}catch{}
-        handlingRemoval=false;
-        return;
+      if(this===sessionStorage&&key===TIMER_KEY&&!handlingRemoval){
+        if(pauseRequested){
+          handlingRemoval=true;
+          try{const current=readTimer();if(current)writePaused(current)}catch{}
+          pauseRequested=false;
+          try{originalRemoveItem.call(this,key)}catch{}
+          try{localStorage.removeItem(TIMER_KEY)}catch{}
+          handlingRemoval=false;
+          return;
+        }
+        if(!allowTimerRemoval){
+          // Timer component unmount/navigation must not destroy a running session.
+          // Reset/mode controls explicitly grant removal for a short window.
+          return;
+        }
       }
       return originalRemoveItem.call(this,key);
     };
@@ -93,7 +110,7 @@ export default function TimerSyncGuard(){
               body.activeTimer=null;
               body.activeTimerExpectedVersion=requestExpected;
             }else if(localTimer){
-              body.activeTimer=localTimer;
+              body.activeTimer=checkpointTimer()||localTimer;
               body.activeTimerExpectedVersion=requestExpected;
             }else{
               body.activeTimerExpectedVersion=requestExpected;
@@ -108,13 +125,19 @@ export default function TimerSyncGuard(){
 
       try{
         const data=await response.clone().json();
-        if(Number.isFinite(Number(data.timerVersion)))writeVersion(Number(data.timerVersion));
+        const cloudVersion=Number(data.timerVersion);
+        const localVersion=requestExpected;
+        if(Number.isFinite(cloudVersion)&&cloudVersion>localVersion)writeVersion(cloudVersion);
 
-        // During hydration, local running state is authoritative. Never let an older
-        // cloud timer replace the timer that survived refresh/tab navigation.
         if(!isPaused()&&(!init?.method||init.method.toUpperCase()==="GET")){
           const current=checkpointTimer();
-          if(current)return responseWithTimer(response,current);
+          // A timer already running locally is the refresh/navigation survivor unless
+          // the server has a strictly newer version from another device.
+          if(current&&(!Number.isFinite(cloudVersion)||localVersion>=cloudVersion))return responseWithTimer(response,current);
+          if(!current&&Number.isFinite(cloudVersion)&&cloudVersion>localVersion&&data.data?.activeTimer){
+            writeTimer(data.data.activeTimer);
+            clearPaused();
+          }
         }
         if(isPaused()&&(!init?.method||init.method.toUpperCase()==="GET"))return responseWithTimer(response,null);
 
@@ -127,15 +150,15 @@ export default function TimerSyncGuard(){
       return response;
     };
 
-    const syncTimer=async(forceCloud=false)=>{
+    const syncTimer=async(forceCloud=false,keepalive=false)=>{
       if(isPaused())return;
       const t=checkpointTimer();if(!t)return;
-      if(!forceCloud&&Date.now()-lastCloudSync<CLOUD_MS)return;
+      if(!forceCloud&&!keepalive&&Date.now()-lastCloudSync<CLOUD_MS)return;
       lastCloudSync=Date.now();
       try{
-        const a=await originalFetch("/api/auth",{cache:"no-store"});const auth=await a.json();if(!auth.loggedIn)return;
+        const a=await originalFetch("/api/auth",{cache:"no-store",keepalive});const auth=await a.json();if(!auth.loggedIn)return;
         const expected=readVersion();
-        const r=await originalFetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({activeTimer:t,activeTimerExpectedVersion:expected})});
+        const r=await originalFetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({activeTimer:t,activeTimerExpectedVersion:expected}),keepalive});
         const data=await r.clone().json().catch(()=>null);
         if(Number.isFinite(Number(data?.timerVersion)))writeVersion(Number(data.timerVersion));
       }catch{}
@@ -152,9 +175,17 @@ export default function TimerSyncGuard(){
       }).catch(()=>{});
     };
 
+    const onVisibility=()=>{
+      if(document.visibilityState==="visible")void syncTimer(true);
+      else void syncTimer(true,true);
+    };
+    const onPageHide=()=>{void syncTimer(true,true)};
     const onLogout=()=>{removeTimer();clearPaused();try{localStorage.removeItem(VERSION_KEY)}catch{}};
+
     window.addEventListener("storage",onStorage);
     window.addEventListener("studyx-logout",onLogout);
+    document.addEventListener("visibilitychange",onVisibility);
+    window.addEventListener("pagehide",onPageHide);
 
     const restoreId=window.setTimeout(()=>{
       if(!restoring)return;
@@ -173,11 +204,14 @@ export default function TimerSyncGuard(){
       window.clearTimeout(restoreId);
       window.clearInterval(id);
       window.clearTimeout(initial);
+      removalResetTimers.forEach(window.clearTimeout);
       window.fetch=originalFetch;
       Storage.prototype.removeItem=originalRemoveItem;
       document.removeEventListener("click",onTimerControl,true);
       window.removeEventListener("storage",onStorage);
       window.removeEventListener("studyx-logout",onLogout);
+      document.removeEventListener("visibilitychange",onVisibility);
+      window.removeEventListener("pagehide",onPageHide);
     };
   },[]);
   return null;
