@@ -73,10 +73,12 @@ export default function TimerSyncGuard(){
       return response;
     };
     const onStorage=(e:StorageEvent)=>{if(e.key!==VERSION_KEY)return;void originalFetch("/api/sync",{cache:"no-store"}).then(r=>r.json()).then(x=>{if(Number.isFinite(Number(x.timerVersion)))writeVersion(Number(x.timerVersion));if(x.data&&Object.prototype.hasOwnProperty.call(x.data,"activeTimer")){try{if(x.data.activeTimer===null)sessionStorage.removeItem(TIMER_KEY);else sessionStorage.setItem(TIMER_KEY,JSON.stringify(x.data.activeTimer))}catch{}}}).catch(()=>{})};
+    const onLogout=()=>{try{sessionStorage.removeItem(TIMER_KEY)}catch{};try{localStorage.removeItem(VERSION_KEY)}catch{}};
     window.addEventListener("storage",onStorage);
+    window.addEventListener("studyx-logout",onLogout);
     const id=window.setInterval(()=>{void syncTimer()},CHECKPOINT_MS);
     void syncTimer(true);
-    return()=>{disposed=true;window.clearInterval(id);window.fetch=original;window.removeEventListener("storage",onStorage)};
+    return()=>{disposed=true;window.clearInterval(id);window.fetch=original;window.removeEventListener("storage",onStorage);window.removeEventListener("studyx-logout",onLogout)};
   },[]);
   return null;
 }
