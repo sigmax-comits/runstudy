@@ -72,23 +72,6 @@ function mergeProgress(currentProgress:any,incoming:any){
   };
 }
 
-function liveTimerSeconds(timer:any){
-  if(!timer?.run)return 0;
-  const started=Number(timer.startedAt),before=Number(timer.elapsedBefore)||0;
-  if(!Number.isFinite(started))return 0;
-  const elapsed=Math.max(0,Math.floor((Date.now()-started)/1000));
-  const value=before+elapsed;
-  if(timer.mode==="Stopwatch")return value;
-  return Math.min(Number(timer.total)||0,value);
-}
-
-function withLiveProgress(progress:any,timer:any){
-  if(!timer?.run)return progress;
-  const base=Number.isFinite(Number(timer.progressBaseSeconds))?Number(timer.progressBaseSeconds):Number(progress?.seconds||0);
-  const live=Math.max(Number(progress?.seconds||0),base+liveTimerSeconds(timer));
-  return {...progress,seconds:live};
-}
-
 export async function GET(req:NextRequest){
   const u=current(req);if(!u)return NextResponse.json({error:"Not logged in"},{status:401});
   try{
@@ -101,7 +84,7 @@ export async function GET(req:NextRequest){
     let activeTimer:any=null;
     if(timer.result){try{activeTimer=JSON.parse(timer.result)}catch{}}
     const timerVersion=Number(versionRaw.result||0)||0;
-    return NextResponse.json({username:u,data:{progress:withLiveProgress(progress,activeTimer),tasks,activeTimer},timerVersion});
+    return NextResponse.json({username:u,data:{progress,tasks,activeTimer},timerVersion});
   }catch{return NextResponse.json({error:"Cloud storage is not configured"},{status:503})}
 }
 
@@ -148,8 +131,7 @@ export async function POST(req:NextRequest){
       if(timer.result){try{activeTimer=JSON.parse(timer.result)}catch{activeTimer=null}}else activeTimer=null;
     }
 
-    const responseProgress=withLiveProgress(progress,activeTimer);
-    const responseData={progress:responseProgress,tasks,activeTimer};
+    const responseData={progress,tasks,activeTimer};
     await kv(["ZADD","studyx:leaderboard","GT",String(responseData.progress?.seconds||0),u]);
     return NextResponse.json({ok:true,accepted:timerAccepted,data:responseData,timerVersion});
   }catch{return NextResponse.json({error:"Cloud storage is not configured"},{status:503})}
