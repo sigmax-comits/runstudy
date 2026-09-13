@@ -5,21 +5,28 @@ import {useRouter} from "next/navigation";
 export default function AdminShortcut(){
  const router=useRouter();
  useEffect(()=>{
-  const bind=()=>{
-   const buttons=Array.from(document.querySelectorAll("button"));
-   for(const button of buttons){
-    if(button.dataset.adminShortcutBound==="1")continue;
-    if(button.textContent?.trim()!=="⋮")continue;
-    const parent=button.parentElement;
-    if(!parent?.textContent?.includes("@"))continue;
-    button.dataset.adminShortcutBound="1";
-    button.addEventListener("click",()=>router.push("/admin"));
+  const onClick=(event:MouseEvent)=>{
+   let el=event.target as HTMLElement|null;
+   while(el&&el!==document.body){
+    const text=el.textContent?.trim()||"";
+    const isDots=text==="⋮"||text==="⋯"||text==="..."||text==="•••";
+    if(isDots){
+     const parent=el.parentElement;
+     const grandparent=parent?.parentElement;
+     const hasProfile=!!(parent?.textContent?.includes("@")||grandparent?.textContent?.includes("@"));
+     const rect=el.getBoundingClientRect();
+     if(hasProfile&&rect.left>window.innerWidth/2){
+      event.preventDefault();
+      event.stopPropagation();
+      router.push("/admin");
+      return;
+     }
+    }
+    el=el.parentElement;
    }
   };
-  bind();
-  const observer=new MutationObserver(bind);
-  observer.observe(document.body,{childList:true,subtree:true});
-  return()=>observer.disconnect();
+  document.addEventListener("click",onClick,true);
+  return()=>document.removeEventListener("click",onClick,true);
  },[router]);
  return null;
 }
