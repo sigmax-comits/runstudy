@@ -44,17 +44,31 @@ async function readJson(key:string,fallback:any){
   try{return JSON.parse(value.result)}catch{return fallback}
 }
 
+function progressTimestamp(value:any){
+  const n=Number(value?.updatedAt);
+  return Number.isFinite(n)&&n>0?n:0;
+}
+
 function mergeProgress(currentProgress:any,incoming:any){
-  const currentDaily=currentProgress?.daily&&typeof currentProgress.daily==="object"?currentProgress.daily:{};
-  const incomingDaily=incoming?.daily&&typeof incoming.daily==="object"?incoming.daily:{};
-  const daily={...currentDaily};
-  for(const [day,value] of Object.entries(incomingDaily))daily[day]=Math.max(Number(daily[day]||0),Number(value)||0);
+  const current=currentProgress&&typeof currentProgress==="object"?currentProgress:{};
+  const next=incoming&&typeof incoming==="object"?incoming:{};
+  const currentSeconds=Math.max(0,Number(current.seconds)||0);
+  const incomingSeconds=Math.max(0,Number(next.seconds)||0);
+  const currentAt=progressTimestamp(current);
+  const incomingAt=progressTimestamp(next);
+  const incomingIsNewer=incomingAt>currentAt||(incomingAt===currentAt&&incomingSeconds>=currentSeconds);
+  const winner=incomingIsNewer?next:current;
+  const dailyCurrent=current.daily&&typeof current.daily==="object"?current.daily:{};
+  const dailyIncoming=next.daily&&typeof next.daily==="object"?next.daily:{};
+  const daily={...dailyCurrent};
+  for(const [day,value] of Object.entries(dailyIncoming))daily[day]=Math.max(Number(daily[day]||0),Number(value)||0);
   return {
-    ...currentProgress,
-    ...incoming,
-    seconds:Math.max(Number(currentProgress?.seconds||0),Number(incoming?.seconds||0)),
-    sessions:Math.max(Number(currentProgress?.sessions||0),Number(incoming?.sessions||0)),
-    daily
+    ...current,
+    ...winner,
+    seconds:Math.max(currentSeconds,incomingSeconds),
+    sessions:Math.max(Number(current.sessions||0),Number(next.sessions||0)),
+    daily,
+    updatedAt:Math.max(currentAt,incomingAt)
   };
 }
 
