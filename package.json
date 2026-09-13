@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "typecheck": "tsc --noEmit",
+    "build:verify": "npm run typecheck && npm run build"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -20,6 +21,6 @@
     "@types/react-dom": "latest",
     "tailwindcss": "^3.4.17",
     "typescript": "latest",
-    "autoprefixer": "^10.4.20"
+    "autoprefixer": "10.4.20"
   }
 }
