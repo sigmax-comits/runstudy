@@ -107,8 +107,17 @@ export default function Timer(){
    tick();const id=window.setInterval(tick,250);
    const onVisibility=()=>{const current=stateRef.current;if(!current.running)return;if(document.visibilityState==="hidden"){const saved=persistRunning(current,Date.now(),true);void syncCloud(saved)}else{const now=Date.now();const elapsed=elapsedOf(stateRef.current,now);applyProgress(lastProgressElapsedRef.current,elapsed,now);lastProgressElapsedRef.current=elapsed;setLeft(remainingOf(stateRef.current,now));}};
    const onPageHide=()=>{const current=stateRef.current;if(current.running){const saved=persistRunning(current,Date.now(),false);void syncCloud(saved)}};
-   document.addEventListener("visibilitychange",onVisibility);window.addEventListener("pagehide",onPageHide);
-   return()=>{window.clearInterval(id);document.removeEventListener("visibilitychange",onVisibility);window.removeEventListener("pagehide",onPageHide);const current=stateRef.current;if(current.running){const saved=persistRunning(current,Date.now(),false);void syncCloud(saved)}};
+   const onStorage=()=>{
+     const incoming=readTimer();
+     if(!incoming)return;
+     const now=Date.now();
+     stateRef.current=incoming;
+     lastProgressElapsedRef.current=incoming.elapsedBeforeStart;
+     setState(incoming);
+     setLeft(remainingOf(incoming,now));
+   };
+   document.addEventListener("visibilitychange",onVisibility);window.addEventListener("pagehide",onPageHide);window.addEventListener("storage",onStorage);
+   return()=>{window.clearInterval(id);document.removeEventListener("visibilitychange",onVisibility);window.removeEventListener("pagehide",onPageHide);window.removeEventListener("storage",onStorage);const current=stateRef.current;if(current.running){const saved=persistRunning(current,Date.now(),false);void syncCloud(saved)}};
  },[applyProgress,persistRunning,hydrated,syncCloud]);
 
  const pauseTimer=useCallback(()=>{const current=stateRef.current;if(!current.running)return;const now=Date.now();const elapsed=elapsedOf(current,now);applyProgress(lastProgressElapsedRef.current,elapsed,now);lastProgressElapsedRef.current=elapsed;const paused={...current,running:false,elapsedBeforeStart:elapsed};stateRef.current=paused;setState(paused);setLeft(remainingOf(paused));writeTimer(paused);void syncCloud(paused)},[applyProgress,syncCloud]);
