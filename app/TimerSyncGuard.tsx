@@ -3,6 +3,7 @@ import {useEffect,useLayoutEffect} from "react";
 
 const VERSION_KEY="study-x-timer-version";
 const TIMER_KEY="study-x-timer";
+const PAUSED_KEY="study-x-timer-paused";
 const CHECKPOINT_MS=1000;
 const CLOUD_MS=5000;
 
@@ -22,14 +23,77 @@ function checkpointTimer(now=Date.now()){
   writeTimer(next);
   return next;
 }
+function readPaused(){try{const raw=localStorage.getItem(PAUSED_KEY);if(!raw)return null;const t=JSON.parse(raw);if(!t||t.run!==false)return null;const total=Number(t.total),elapsedBefore=Number(t.elapsedBefore)||0;if(!Number.isFinite(total)||total<0||elapsedBefore<0)return null;return t as StoredTimer}catch{return null}}
+function writePaused(t:StoredTimer){try{localStorage.setItem(PAUSED_KEY,JSON.stringify({...t,run:false,startedAt:0}))}catch{}}
+function clearPaused(){try{localStorage.removeItem(PAUSED_KEY)}catch{}}
 
 export default function TimerSyncGuard(){
   useLayoutEffect(()=>{
-    try{
-      const raw=localStorage.getItem(TIMER_KEY);
-      if(raw&&!sessionStorage.getItem(TIMER_KEY))sessionStorage.setItem(TIMER_KEY,raw);
-    }catch{}
+    let restoring=false;
+    let pauseRequested=false;
+    let handlingRemoval=false;
+    const originalRemoveItem=Storage.prototype.removeItem;
+    const onTimerControl=(event:Event)=>{
+      const target=event.target as HTMLElement|null;
+      const button=target?.closest("button") as HTMLButtonElement|null;
+      if(!button)return;
+      if(button.classList.contains("start-button")){
+        const text=(button.textContent||"").trim().toLowerCase();
+        if(text==="pause"){
+          const current=readTimer();
+          if(current){const latest=checkpointTimer();if(latest)writePaused(latest);pauseRequested=true;}
+        }else{
+          clearPaused();
+        }
+        return;
+      }
+      if(button.classList.contains("round-control")||button.classList.contains("save-control")||button.closest(".mode-tabs")||button.closest(".preset-stack")||button.closest(".custom-box"))clearPaused();
+    };
+    Storage.prototype.removeItem=function(key:string){
+      if(this===sessionStorage&&key===TIMER_KEY&&pauseRequested&&!handlingRemoval){
+        handlingRemoval=true;
+        try{
+          const current=readTimer();
+          if(current)writePaused(current);
+          clearPaused();
+          if(current)writePaused(current);
+        }catch{}
+        pauseRequested=false;
+        try{originalRemoveItem.call(this,key)}catch{}
+        try{localStorage.removeItem(TIMER_KEY)}catch{}
+        handlingRemoval=false;
+        return;
+      }
+      return originalRemoveItem.call(this,key);
+    };
+    const raw=localStorage.getItem(PAUSED_KEY);
+    if(raw&&!sessionStorage.getItem(TIMER_KEY)){
+      try{
+        const p=readPaused();
+        if(p){
+          const restored={...p,run:true,startedAt:Date.now()};
+          restoring=true;
+          writeTimer(restored);
+        }
+      }catch{}
+    }else if(raw&&sessionStorage.getItem(TIMER_KEY)){
+      try{const p=readPaused();if(p){const current=readTimer();if(!current)writeTimer({...p,run:true,startedAt:Date.now()})}}catch{}
+    }
+    const id=window.setTimeout(()=>{
+      if(!restoring)return;
+      const start=document.querySelector(".start-button") as HTMLButtonElement|null;
+      if(start&&(start.textContent||"").trim().toLowerCase()==="pause"){
+        pauseRequested=false;
+        restoring=false;
+        start.click();
+      }
+    },0);
+    return()=>{
+      window.clearTimeout(id);
+      Storage.prototype.removeItem=originalRemoveItem;
+    };
   },[]);
+
   useEffect(()=>{
     const original=window.fetch.bind(window);
     let disposed=false;
@@ -81,7 +145,7 @@ export default function TimerSyncGuard(){
       return response;
     };
     const onStorage=(e:StorageEvent)=>{if(e.key!==VERSION_KEY)return;void originalFetch("/api/sync",{cache:"no-store"}).then(r=>r.json()).then(x=>{if(Number.isFinite(Number(x.timerVersion)))writeVersion(Number(x.timerVersion));if(x.data&&Object.prototype.hasOwnProperty.call(x.data,"activeTimer")){try{if(x.data.activeTimer===null)removeTimer();else writeTimer(x.data.activeTimer)}catch{}}}).catch(()=>{})};
-    const onLogout=()=>{removeTimer();try{localStorage.removeItem(VERSION_KEY)}catch{}};
+    const onLogout=()=>{removeTimer();clearPaused();try{localStorage.removeItem(VERSION_KEY)}catch{}};
     window.addEventListener("storage",onStorage);
     window.addEventListener("studyx-logout",onLogout);
     const id=window.setInterval(()=>{void syncTimer()},CHECKPOINT_MS);
