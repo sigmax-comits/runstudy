@@ -25,9 +25,12 @@ export default function TimerSyncGuard(){
   useEffect(()=>{
     const original=window.fetch.bind(window);
     let disposed=false;
+    let lastCloudSync=0;
     const isSync=(input:RequestInfo|URL)=>{const url=typeof input==="string"?input:input instanceof Request?input.url:input.toString();return new URL(url,window.location.href).pathname==="/api/sync"};
-    const syncTimer=async()=>{
+    const syncTimer=async(forceCloud=false)=>{
       const t=checkpointTimer();if(!t)return;
+      if(!forceCloud&&Date.now()-lastCloudSync<CLOUD_MS)return;
+      lastCloudSync=Date.now();
       try{
         const a=await original("/api/auth",{cache:"no-store"});const auth=await a.json();if(!auth.loggedIn)return;
         const expected=readVersion();
@@ -72,9 +75,8 @@ export default function TimerSyncGuard(){
     const onStorage=(e:StorageEvent)=>{if(e.key!==VERSION_KEY)return;void originalFetch("/api/sync",{cache:"no-store"}).then(r=>r.json()).then(x=>{if(Number.isFinite(Number(x.timerVersion)))writeVersion(Number(x.timerVersion));if(x.data&&Object.prototype.hasOwnProperty.call(x.data,"activeTimer")){try{if(x.data.activeTimer===null)sessionStorage.removeItem(TIMER_KEY);else sessionStorage.setItem(TIMER_KEY,JSON.stringify(x.data.activeTimer))}catch{}}}).catch(()=>{})};
     window.addEventListener("storage",onStorage);
     const id=window.setInterval(()=>{void syncTimer()},CHECKPOINT_MS);
-    const cloudId=window.setInterval(()=>{void syncTimer()},CLOUD_MS);
-    void syncTimer();
-    return()=>{disposed=true;window.clearInterval(id);window.clearInterval(cloudId);window.fetch=original;window.removeEventListener("storage",onStorage)};
+    void syncTimer(true);
+    return()=>{disposed=true;window.clearInterval(id);window.fetch=original;window.removeEventListener("storage",onStorage)};
   },[]);
   return null;
 }
