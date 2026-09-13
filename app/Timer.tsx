@@ -67,16 +67,19 @@ export default function Timer(){
 
  const applyProgress=useCallback((fromElapsed:number,toElapsed:number,at:number)=>{
    const delta=Math.max(0,toElapsed-fromElapsed);if(!delta||!isProgressLeader(at))return;
-   const sessionId=progressSessionRef.current;if(!sessionId)return;
+   const current=stateRef.current;if(!current.running||current.startedAt<=0)return;
    try{
      const raw=localStorage.getItem(PROGRESS_CURSOR_KEY);let cursor:any=null;
      if(raw){try{cursor=JSON.parse(raw)}catch{}}
-     const previous=cursor?.sessionId===sessionId?Math.max(0,Number(cursor.elapsed)||0):0;
-     const effectiveFrom=Math.max(fromElapsed,previous);
-     const add=Math.max(0,toElapsed-effectiveFrom);if(!add)return;
+     const baseMs=current.startedAt-current.elapsedBeforeStart*1000;
+     const fromAt=Math.floor((baseMs+fromElapsed*1000)/1000);
+     const toAt=Math.floor((baseMs+toElapsed*1000)/1000);
+     const previousAt=Number(cursor?.at)||0;
+     const effectiveFrom=Math.max(fromAt,previousAt);
+     const add=Math.max(0,toAt-effectiveFrom);if(!add)return;
      const p=readProgress();p.daily=p.daily||{};const day=new Date(at).toISOString().slice(0,10);const used=p.daily[day]||0;const capped=Math.min(add,Math.max(0,20*3600-used));
      if(capped>0){p.seconds=(p.seconds||0)+capped;p.daily[day]=used+capped;p.updatedAt=at;writeProgress(p)}
-     localStorage.setItem(PROGRESS_CURSOR_KEY,JSON.stringify({sessionId,elapsed:Math.max(previous,toElapsed)}));
+     localStorage.setItem(PROGRESS_CURSOR_KEY,JSON.stringify({at:Math.max(previousAt,toAt)}));
    }catch{}
  },[isProgressLeader]);
 
@@ -148,11 +151,11 @@ export default function Timer(){
      setLeft(remainingOf(incoming,now));
    };
    document.addEventListener("visibilitychange",onVisibility);window.addEventListener("pagehide",onPageHide);window.addEventListener("storage",onStorage);
-   return()=>{window.clearInterval(id);window.clearInterval(leaderId);document.removeEventListener("visibilitychange",onVisibility);window.removeEventListener("pagehide",onPageHide);window.removeEventListener("storage",onStorage);const current=stateRef.current;if(current.running){const saved=persistRunning(current,Date.now(),false);void syncCloud(saved)}};
+   return()=>{window.clearInterval(id);window.clearInterval(leaderId);document.removeEventListener("visibilitychange",onVisibility);window.removeEventListener("pagehide",onPageHide);const current=stateRef.current;if(current.running){const saved=persistRunning(current,Date.now(),false);void syncCloud(saved)}};
  },[applyProgress,persistRunning,isProgressLeader,hydrated,syncCloud]);
 
  const pauseTimer=useCallback(()=>{const current=stateRef.current;if(!current.running)return;const now=Date.now();const elapsed=elapsedOf(current,now);applyProgress(lastProgressElapsedRef.current,elapsed,now);lastProgressElapsedRef.current=elapsed;const paused={...current,running:false,elapsedBeforeStart:elapsed};stateRef.current=paused;setState(paused);setLeft(remainingOf(paused));writeTimer(paused);void syncCloud(paused)},[applyProgress,syncCloud]);
- const resumeTimer=useCallback(()=>{const current=stateRef.current;if(current.running)return;const resumed={...current,running:true,startedAt:Date.now()};stateRef.current=resumed;progressSessionRef.current=resumed.progressSessionId||newProgressSessionId();resumed.progressSessionId=progressSessionRef.current;stateRef.current=resumed;setState(resumed);writeTimer(resumed);void syncCloud(resumed)},[syncCloud]);
+ const resumeTimer=useCallback(()=>{const current=stateRef.current;if(current.running)return;const shared=readTimer();if(shared?.running){stateRef.current=shared;progressSessionRef.current=shared.progressSessionId||progressSessionRef.current||newProgressSessionId();lastProgressElapsedRef.current=elapsedOf(shared);setState(shared);setLeft(remainingOf(shared));return;}const resumed={...current,running:true,startedAt:Date.now()};stateRef.current=resumed;progressSessionRef.current=resumed.progressSessionId||newProgressSessionId();resumed.progressSessionId=progressSessionRef.current;stateRef.current=resumed;setState(resumed);writeTimer(resumed);void syncCloud(resumed)},[syncCloud]);
  const resetTimer=useCallback(()=>{const current=stateRef.current;removeTimer();const reset={...current,running:false,startedAt:0,elapsedBeforeStart:0,progressSessionId:newProgressSessionId()};stateRef.current=reset;setState(reset);setLeft(reset.mode==="Stopwatch"?0:reset.total);lastProgressElapsedRef.current=0;progressSessionRef.current=reset.progressSessionId||"";void syncCloud(null)},[syncCloud]);
  const selectMode=useCallback((m:Mode)=>{if(stateRef.current.running)pauseTimer();const total=m==="Pomodoro"?1500:m==="Focus"?3000:m==="Stopwatch"?0:1500;const next={mode:m,total,running:false,startedAt:0,elapsedBeforeStart:0,progressSessionId:newProgressSessionId()};writeTimer(next);stateRef.current=next;setState(next);setLeft(m==="Stopwatch"?0:total);lastProgressElapsedRef.current=0;progressSessionRef.current=next.progressSessionId||""},[pauseTimer]);
  const setPreset=useCallback((minutes:number)=>{if(stateRef.current.running)pauseTimer();const next={mode:"Timer" as Mode,total:minutes*60,running:false,startedAt:0,elapsedBeforeStart:0,progressSessionId:newProgressSessionId()};writeTimer(next);stateRef.current=next;setState(next);setLeft(next.total);lastProgressElapsedRef.current=0;progressSessionRef.current=next.progressSessionId||""},[pauseTimer]);
