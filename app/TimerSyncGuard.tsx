@@ -23,7 +23,7 @@ function checkpointTimer(now=Date.now()){
   writeTimer(next);
   return next;
 }
-function readPaused(){try{const raw=localStorage.getItem(PAUSED_KEY);if(!raw)return null;const t=JSON.parse(raw);if(!t||t.run!==false)return null;const total=Number(t.total),elapsedBefore=Number(t.elapsedBefore)||0;if(!Number.isFinite(total)||total<0||elapsedBefore<0)return null;return t as StoredTimer}catch{return null}}
+function readPaused():StoredTimer|null{try{const raw=localStorage.getItem(PAUSED_KEY);if(!raw)return null;const t=JSON.parse(raw);if(!t||t.run!==false)return null;const total=Number(t.total),elapsedBefore=Number(t.elapsedBefore)||0;if(!Number.isFinite(total)||total<0||elapsedBefore<0)return null;return {...t,mode:t.mode||"Timer",total,startedAt:0,elapsedBefore,progressBaseSeconds:Number.isFinite(Number(t.progressBaseSeconds))?Number(t.progressBaseSeconds):undefined}}catch{return null}}
 function writePaused(t:StoredTimer){try{localStorage.setItem(PAUSED_KEY,JSON.stringify({...t,run:false,startedAt:0}))}catch{}}
 function clearPaused(){try{localStorage.removeItem(PAUSED_KEY)}catch{}}
 
@@ -49,13 +49,12 @@ export default function TimerSyncGuard(){
       }
       if(button.classList.contains("round-control")||button.classList.contains("save-control")||button.closest(".mode-tabs")||button.closest(".preset-stack")||button.closest(".custom-box"))clearPaused();
     };
+
     Storage.prototype.removeItem=function(key:string){
       if(this===sessionStorage&&key===TIMER_KEY&&pauseRequested&&!handlingRemoval){
         handlingRemoval=true;
         try{
           const current=readTimer();
-          if(current)writePaused(current);
-          clearPaused();
           if(current)writePaused(current);
         }catch{}
         pauseRequested=false;
@@ -66,6 +65,9 @@ export default function TimerSyncGuard(){
       }
       return originalRemoveItem.call(this,key);
     };
+
+    document.addEventListener("click",onTimerControl,true);
+
     const raw=localStorage.getItem(PAUSED_KEY);
     if(raw&&!sessionStorage.getItem(TIMER_KEY)){
       try{
@@ -76,20 +78,20 @@ export default function TimerSyncGuard(){
           writeTimer(restored);
         }
       }catch{}
-    }else if(raw&&sessionStorage.getItem(TIMER_KEY)){
-      try{const p=readPaused();if(p){const current=readTimer();if(!current)writeTimer({...p,run:true,startedAt:Date.now()})}}catch{}
     }
+
     const id=window.setTimeout(()=>{
       if(!restoring)return;
       const start=document.querySelector(".start-button") as HTMLButtonElement|null;
       if(start&&(start.textContent||"").trim().toLowerCase()==="pause"){
-        pauseRequested=false;
         restoring=false;
         start.click();
       }
     },0);
+
     return()=>{
       window.clearTimeout(id);
+      document.removeEventListener("click",onTimerControl,true);
       Storage.prototype.removeItem=originalRemoveItem;
     };
   },[]);
