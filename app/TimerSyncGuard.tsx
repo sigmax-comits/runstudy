@@ -1,5 +1,5 @@
 "use client";
-import {useEffect,useLayoutEffect} from "react";
+import {useLayoutEffect} from "react";
 
 const VERSION_KEY="study-x-timer-version";
 const TIMER_KEY="study-x-timer";
@@ -28,12 +28,20 @@ function writePaused(t:StoredTimer){try{localStorage.setItem(PAUSED_KEY,JSON.str
 function clearPaused(){try{localStorage.removeItem(PAUSED_KEY)}catch{}}
 function isPaused(){return !!readPaused()}
 
+function responseWithTimer(response:Response,timer:StoredTimer|null){
+  return response.clone().json().then(data=>new Response(JSON.stringify({...data,data:{...(data.data||{}),activeTimer:timer}}),{status:response.status,statusText:response.statusText,headers:{"Content-Type":"application/json"}})).catch(()=>response);
+}
+
 export default function TimerSyncGuard(){
   useLayoutEffect(()=>{
+    let disposed=false;
     let restoring=false;
     let pauseRequested=false;
     let handlingRemoval=false;
+    let lastCloudSync=0;
     const originalRemoveItem=Storage.prototype.removeItem;
+    const originalFetch=window.fetch.bind(window);
+
     const onTimerControl=(event:Event)=>{
       const target=event.target as HTMLElement|null;
       const button=target?.closest("button") as HTMLButtonElement|null;
@@ -66,54 +74,18 @@ export default function TimerSyncGuard(){
 
     if(!sessionStorage.getItem(TIMER_KEY)){
       const p=readPaused();
-      if(p){
-        restoring=true;
-        writeTimer({...p,run:true,startedAt:Date.now()});
-      }
+      if(p){restoring=true;writeTimer({...p,run:true,startedAt:Date.now()});}
     }
 
-    const id=window.setTimeout(()=>{
-      if(!restoring)return;
-      const start=document.querySelector(".start-button") as HTMLButtonElement|null;
-      if(start&&(start.textContent||"").trim().toLowerCase()==="pause"){
-        restoring=false;
-        start.click();
-      }
-    },50);
-
-    return()=>{
-      window.clearTimeout(id);
-      document.removeEventListener("click",onTimerControl,true);
-      Storage.prototype.removeItem=originalRemoveItem;
-    };
-  },[]);
-
-  useEffect(()=>{
-    const original=window.fetch.bind(window);
-    let disposed=false;
-    let lastCloudSync=0;
-    const isSync=(input:RequestInfo|URL)=>{const url=typeof input==="string"?input:input instanceof Request?input.url:input.toString();return new URL(url,window.location.href).pathname==="/api/sync"};
-    const canonicalTimer=()=>{if(isPaused())return null;return checkpointTimer()};
-    const syncTimer=async(forceCloud=false)=>{
-      const t=canonicalTimer();if(!t)return;
-      if(!forceCloud&&Date.now()-lastCloudSync<CLOUD_MS)return;
-      lastCloudSync=Date.now();
-      try{
-        const a=await original("/api/auth",{cache:"no-store"});const auth=await a.json();if(!auth.loggedIn)return;
-        const expected=readVersion();
-        const r=await original("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({activeTimer:t,activeTimerExpectedVersion:expected})});
-        const data=await r.clone().json().catch(()=>null);
-        if(Number.isFinite(Number(data?.timerVersion)))writeVersion(Number(data.timerVersion));
-      }catch{}
-    };
-    const originalFetch=window.fetch;
     window.fetch=async(input,init)=>{
+      const url=typeof input==="string"?input:input instanceof Request?input.url:input.toString();
+      const isSync=new URL(url,window.location.href).pathname==="/api/sync";
       let nextInit=init;
       let timerMutation=false;
       const requestExpected=readVersion();
-      const localTimer=checkpointTimer();
+      const localTimer=readTimer();
       try{
-        if(isSync(input)&&init?.method?.toUpperCase()==="POST"&&typeof init.body==="string"){
+        if(isSync&&init?.method?.toUpperCase()==="POST"&&typeof init.body==="string"){
           const body=JSON.parse(init.body);
           if(Object.prototype.hasOwnProperty.call(body,"activeTimer")){
             timerMutation=true;
@@ -130,20 +102,22 @@ export default function TimerSyncGuard(){
           }
         }
       }catch{}
+
       const response=await originalFetch(input,nextInit);
-      if(!isSync(input))return response;
+      if(!isSync)return response;
+
       try{
         const data=await response.clone().json();
         if(Number.isFinite(Number(data.timerVersion)))writeVersion(Number(data.timerVersion));
-        const current=checkpointTimer();
-        if(isPaused()&&(!init?.method||init.method.toUpperCase()==="GET")){
-          const safeData={...data,data:{...(data.data||{}),activeTimer:null}};
-          return new Response(JSON.stringify(safeData),{status:response.status,statusText:response.statusText,headers:{"Content-Type":"application/json"}});
+
+        // During hydration, local running state is authoritative. Never let an older
+        // cloud timer replace the timer that survived refresh/tab navigation.
+        if(!isPaused()&&(!init?.method||init.method.toUpperCase()==="GET")){
+          const current=checkpointTimer();
+          if(current)return responseWithTimer(response,current);
         }
-        if(current&&(!init?.method||init.method.toUpperCase()==="GET")){
-          const safeData={...data,data:{...(data.data||{}),activeTimer:current}};
-          return new Response(JSON.stringify(safeData),{status:response.status,statusText:response.statusText,headers:{"Content-Type":"application/json"}});
-        }
+        if(isPaused()&&(!init?.method||init.method.toUpperCase()==="GET"))return responseWithTimer(response,null);
+
         if(timerMutation&&!data.accepted&&Number(data.timerVersion)>requestExpected&&!disposed){
           if(Object.prototype.hasOwnProperty.call(data.data||{},"activeTimer")){
             try{if(data.data.activeTimer===null)removeTimer();else writeTimer(data.data.activeTimer)}catch{}
@@ -152,6 +126,21 @@ export default function TimerSyncGuard(){
       }catch{}
       return response;
     };
+
+    const syncTimer=async(forceCloud=false)=>{
+      if(isPaused())return;
+      const t=checkpointTimer();if(!t)return;
+      if(!forceCloud&&Date.now()-lastCloudSync<CLOUD_MS)return;
+      lastCloudSync=Date.now();
+      try{
+        const a=await originalFetch("/api/auth",{cache:"no-store"});const auth=await a.json();if(!auth.loggedIn)return;
+        const expected=readVersion();
+        const r=await originalFetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({activeTimer:t,activeTimerExpectedVersion:expected})});
+        const data=await r.clone().json().catch(()=>null);
+        if(Number.isFinite(Number(data?.timerVersion)))writeVersion(Number(data.timerVersion));
+      }catch{}
+    };
+
     const onStorage=(e:StorageEvent)=>{
       if(e.key!==VERSION_KEY||isPaused()||readTimer())return;
       void originalFetch("/api/sync",{cache:"no-store"}).then(r=>r.json()).then(x=>{
@@ -162,12 +151,34 @@ export default function TimerSyncGuard(){
         }
       }).catch(()=>{});
     };
+
     const onLogout=()=>{removeTimer();clearPaused();try{localStorage.removeItem(VERSION_KEY)}catch{}};
     window.addEventListener("storage",onStorage);
     window.addEventListener("studyx-logout",onLogout);
+
+    const restoreId=window.setTimeout(()=>{
+      if(!restoring)return;
+      const start=document.querySelector(".start-button") as HTMLButtonElement|null;
+      if(start&&(start.textContent||"").trim().toLowerCase()==="pause"){
+        restoring=false;
+        start.click();
+      }
+    },50);
+
     const id=window.setInterval(()=>{void syncTimer()},CHECKPOINT_MS);
     const initial=window.setTimeout(()=>{void syncTimer(true)},150);
-    return()=>{disposed=true;window.clearInterval(id);window.clearTimeout(initial);window.fetch=original;window.removeEventListener("storage",onStorage);window.removeEventListener("studyx-logout",onLogout)};
+
+    return()=>{
+      disposed=true;
+      window.clearTimeout(restoreId);
+      window.clearInterval(id);
+      window.clearTimeout(initial);
+      window.fetch=originalFetch;
+      Storage.prototype.removeItem=originalRemoveItem;
+      document.removeEventListener("click",onTimerControl,true);
+      window.removeEventListener("storage",onStorage);
+      window.removeEventListener("studyx-logout",onLogout);
+    };
   },[]);
   return null;
 }
