@@ -1,10 +1,9 @@
 "use client";
-import {useEffect,useMemo,useRef,useState} from "react";
+import {useEffect,useMemo,useState} from "react";
 import {usePathname,useRouter} from "next/navigation";
+import PersistentTimer from "./Timer";
 
 type Mode="Timer"|"Pomodoro"|"Stopwatch"|"Focus";
-const modes:Mode[]=["Timer","Pomodoro","Stopwatch","Focus"];
-const presets=[15,25,45,60,120];
 const cats=["All","Streaks","Study Hours","Sessions","Social","Special"];
 const achievements=[
 ["01","First Step","Complete your very first study session","Sessions",true,50],
@@ -25,192 +24,8 @@ const achievements=[
 ["16","Consistency King","Study at the same time every day for 2 weeks","Streaks",false,350,5,14]
 ] as const;
 
-function pad(n:number){return String(n).padStart(2,"0")}
-function fmt(n:number){const h=Math.floor(n/3600),m=Math.floor(n%3600/60),s=n%60;return h?pad(h)+":"+pad(m)+":"+pad(s):pad(m)+":"+pad(s)}
+function Timer(){return <PersistentTimer/>}
 
-function Timer(){
- const [mode,setMode]=useState<Mode>("Timer"),[total,setTotal]=useState(1500),[left,setLeft]=useState(1500),[run,setRun]=useState(false),[label,setLabel]=useState("Choose subject"),[open,setOpen]=useState(false),[custom,setCustom]=useState({h:"",m:"",s:""}),[customOpen,setCustomOpen]=useState(false);
- const [tasks,setTasks]=useState<{id:number;text:string;done:boolean}[]>([]),[taskText,setTaskText]=useState("");
- const startedAtRef=useRef<number|null>(null);
- const lastTickRef=useRef<number|null>(null);
- const lastPersistRef=useRef<number>(0);
- const lastRunRef=useRef(false);
- const timerStateRef=useRef<{run:boolean;mode:Mode;total:number;startedAt:number|null;elapsedBefore:number}>({run:false,mode:"Timer",total:1500,startedAt:null,elapsedBefore:0});
-
- useEffect(()=>{try{const saved=localStorage.getItem("study-x-tasks");if(saved)setTasks(JSON.parse(saved))}catch{}},[]);
- useEffect(()=>{
-   try{
-     const raw=sessionStorage.getItem("study-x-timer");
-     if(raw){
-       const s=JSON.parse(raw);
-       if(s?.run){
-         const now=Date.now(), started=Number(s.startedAt)||now, elapsedBefore=Number(s.elapsedBefore)||0;
-         timerStateRef.current={run:true,mode:s.mode||"Timer",total:Number(s.total)||1500,startedAt:started,elapsedBefore};
-         setMode(s.mode||"Timer"); setTotal(Number(s.total)||1500); setLeft(s.mode==="Stopwatch"?elapsedBefore+Math.floor((now-started)/1000):Math.max(0,(Number(s.total)||1500)-elapsedBefore-Math.floor((now-started)/1000)));
-         setRun(true);
-       }
-     }
-   }catch{}
- },[]);
- const tasksHydratedRef=useRef(false);
- const tasksSaveTimerRef=useRef<ReturnType<typeof setTimeout>|null>(null);
- useEffect(()=>{const pull=async()=>{try{const a=await fetch("/api/auth",{cache:"no-store"});const auth=await a.json();if(!auth.loggedIn){tasksHydratedRef.current=true;return}const r=await fetch("/api/sync",{cache:"no-store"});if(!r.ok){tasksHydratedRef.current=true;return}const x=await r.json();if(x.data?.progress)localStorage.setItem("study-x-progress",JSON.stringify(x.data.progress));if(Array.isArray(x.data?.tasks)){setTasks(x.data.tasks);localStorage.setItem("study-x-tasks",JSON.stringify(x.data.tasks))}if(Object.prototype.hasOwnProperty.call(x.data||{},"activeTimer")){const t=x.data.activeTimer;if(t?.run&&t.startedAt&&t.total!=null){const now=Date.now(),started=Number(t.startedAt),elapsedBefore=Number(t.elapsedBefore)||0,tm=t.mode||"Timer",tt=Number(t.total)||1500;startedAtRef.current=started;lastTickRef.current=now;setMode(tm);setTotal(tt);setLeft(tm==="Stopwatch"?elapsedBefore+Math.floor((now-started)/1000):Math.max(0,tt-elapsedBefore-Math.floor((now-started)/1000)));try{sessionStorage.setItem("study-x-timer",JSON.stringify(t))}catch{}setRun(true)}else if(t===null){try{sessionStorage.removeItem("study-x-timer")}catch{}setRun(false);startedAtRef.current=null;lastTickRef.current=null}}tasksHydratedRef.current=true}catch{tasksHydratedRef.current=true}};pull();window.addEventListener("studyx-login",pull);return()=>window.removeEventListener("studyx-login",pull)},[]);
- useEffect(()=>{
-   try{localStorage.setItem("study-x-tasks",JSON.stringify(tasks))}catch{}
-   if(!tasksHydratedRef.current)return;
-   if(tasksSaveTimerRef.current)clearTimeout(tasksSaveTimerRef.current);
-   tasksSaveTimerRef.current=setTimeout(async()=>{
-     try{
-       const a=await fetch("/api/auth",{cache:"no-store"});const auth=await a.json();if(!auth.loggedIn)return;
-       await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tasks})});
-     }catch{}
-   },350);
-   return()=>{if(tasksSaveTimerRef.current)clearTimeout(tasksSaveTimerRef.current)}
- },[tasks]);
-
- async function persistProgress(data:any){try{localStorage.setItem("study-x-progress",JSON.stringify(data));const a=await fetch("/api/auth",{cache:"no-store"});if(!(await a.json()).loggedIn)return;await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({progress:data,tasks})})}catch{}}
-
- function applyElapsed(now=Date.now()){
-   if(!lastTickRef.current)return;
-   const previous=lastTickRef.current;
-   const elapsed=Math.max(0,Math.floor((now-previous)/1000));
-   if(!elapsed)return;
-   lastTickRef.current=previous+elapsed*1000;
-   try{
-     const key="study-x-progress";
-     const raw=localStorage.getItem(key);
-     const data=raw?JSON.parse(raw):{seconds:0,sessions:0,daily:{}};
-     data.daily=data.daily||{};
-     let remaining=elapsed;
-     let day=new Date(previous).toISOString().slice(0,10);
-     const used=data.daily[day]||0;
-     const allowed=Math.max(0,20*3600-used);
-     const add=Math.min(remaining,allowed);
-     data.seconds=(data.seconds||0)+add;
-     data.daily[day]=used+add;
-     if(add>0)localStorage.setItem(key,JSON.stringify(data));
-     if(now-lastPersistRef.current>=5000){lastPersistRef.current=now;void persistProgress(data);}
-     if(add<remaining)setRun(false);
-   }catch{}
- }
-
- useEffect(()=>{if(!run)return;const syncActive=async()=>{try{const a=await fetch("/api/auth",{cache:"no-store"});const auth=await a.json();if(!auth.loggedIn)return;const elapsedBefore=mode==="Stopwatch"?left:Math.max(0,total-left);const activeTimer={run:true,mode,total,startedAt:startedAtRef.current||Date.now(),elapsedBefore};await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({activeTimer})})}catch{}};syncActive();const id=setInterval(syncActive,5000);return()=>clearInterval(id)},[run,mode,total]);
-
- useEffect(()=>{
-   timerStateRef.current={...timerStateRef.current,run,mode,total,startedAt:startedAtRef.current,elapsedBefore:Math.max(0,total-left)};
-   if(run){
-     if(!startedAtRef.current)startedAtRef.current=Date.now();
-     if(!lastTickRef.current)lastTickRef.current=Date.now();
-     lastRunRef.current=true;
-     try{sessionStorage.setItem("study-x-timer",JSON.stringify({run:true,mode,total,startedAt:startedAtRef.current,elapsedBefore:mode==="Stopwatch"?left:Math.max(0,total-left)}))}catch{}
-     const id=setInterval(()=>{
-       applyElapsed();
-       setLeft(v=>{
-         if(mode==="Stopwatch"){
-           return Math.max(0,v+1);
-         }
-         const elapsed=Math.max(0,Math.floor((Date.now()-(startedAtRef.current||Date.now()))/1000));
-         const next=Math.max(0,total-elapsed);
-         if(next===0){
-           try{
-             const key="study-x-progress";
-             const d=JSON.parse(localStorage.getItem(key)||"{\"seconds\":0,\"sessions\":0,\"daily\":{}}");
-             d.sessions=(d.sessions||0)+1;
-             localStorage.setItem(key,JSON.stringify(d));
-             void persistProgress(d);
-           }catch{}
-           try{sessionStorage.removeItem("study-x-timer")}catch{}
-           void clearActiveTimerCloud();
-           setRun(false);
-         }
-         return next;
-       });
-     },250);
-     return()=>clearInterval(id);
-   }
-   if(lastRunRef.current){
-     applyElapsed();
-     lastRunRef.current=false;
-   }
- },[run,mode,total]);
-
-
- const pct=mode==="Stopwatch"?100:total?((total-left)/total)*100:0;
- function choose(m:Mode){if(run){applyElapsed();void clearActiveTimerCloud();}setRun(false);startedAtRef.current=null;lastTickRef.current=null;setMode(m);if(m==="Pomodoro"){setTotal(1500);setLeft(1500)}else if(m==="Focus"){setTotal(3000);setLeft(3000)}else if(m==="Stopwatch"){setTotal(0);setLeft(0)}else{setTotal(1500);setLeft(1500)}}
- function preset(n:number){if(run){applyElapsed();void clearActiveTimerCloud();}setRun(false);startedAtRef.current=null;lastTickRef.current=null;setMode("Timer");setTotal(n*60);setLeft(n*60)}
- function apply(){const n=Math.min(20*3600,(+custom.h||0)*3600+(+custom.m||0)*60+(+custom.s||0));if(n){if(run){applyElapsed();void clearActiveTimerCloud();}setRun(false);startedAtRef.current=null;lastTickRef.current=null;setMode("Timer");setTotal(n);setLeft(n)}}
- function toggle(){
-   if(run){
-     applyElapsed();
-     setRun(false);
-     startedAtRef.current=null;
-     lastTickRef.current=null;
-     try{sessionStorage.removeItem("study-x-timer")}catch{}
-     void clearActiveTimerCloud();
-     return;
-   }
-   if(mode==="Stopwatch"){
-     startedAtRef.current=Date.now()-(left*1000);lastTickRef.current=Date.now();setRun(true);return;
-   }
-   if(!total)return;
-   if(!left){setLeft(total);startedAtRef.current=Date.now();lastTickRef.current=Date.now();}
-   else {const elapsed=total-left;startedAtRef.current=Date.now()-elapsed*1000;lastTickRef.current=Date.now();}
-   setRun(true);
- }
- function resetTimer(){setRun(false);startedAtRef.current=null;lastTickRef.current=null;try{sessionStorage.removeItem("study-x-timer")}catch{}setLeft(mode==="Stopwatch"?0:total);void clearActiveTimerCloud()}
- function addTask(){const v=taskText.trim();if(!v)return;setTasks(t=>[...t,{id:Date.now(),text:v,done:false}]);setTaskText("")}
- async function clearActiveTimerCloud(){try{const a=await fetch("/api/auth",{cache:"no-store"});if(!(await a.json()).loggedIn)return;await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({activeTimer:null})})}catch{}}
- async function saveNow(){applyElapsed();try{sessionStorage.removeItem("study-x-timer")}catch{}setRun(false);void clearActiveTimerCloud();try{const a=await fetch("/api/auth",{cache:"no-store"});if(!(await a.json()).loggedIn)return;const progress=JSON.parse(localStorage.getItem("study-x-progress")||"{\"seconds\":0,\"sessions\":0,\"daily\":{}}");await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({progress,tasks})})}catch{}}
- const done=tasks.filter(t=>t.done).length;
- return <main className="timer-page">
-  <div className="timer-intro"><span className="section-kicker">FOCUS / 01</span><h1>Make time for what matters.</h1><p>A quiet workspace for deliberate study.</p></div>
-  <div className="mode-tabs glass-pill">{modes.map(m=><button key={m} onClick={()=>choose(m)} className={m===mode?"active-pill":""}>{m}</button>)}</div>
-  <div className="timer-workspace"><aside className="session-side glass-panel"><div className="side-label">SESSION</div><div className="side-title">Choose your pace.</div><div className="preset-stack">{presets.map(n=><button key={n} onClick={()=>preset(n)} className={total===n*60&&mode==="Timer"?"selected-preset":""}><span>{n>=60?n/60+"h":n+"m"}</span><small>{n===25?"recommended":n===50?"deep focus":"quick session"}</small></button>)}</div><button className={"custom-trigger "+(customOpen?"open":"")} onClick={()=>setCustomOpen(v=>!v)}><span><b>Custom time</b><small>Set your own duration</small></span><i>{customOpen?"−":"+"}</i></button>{customOpen&&<div className="custom-box"><div className="custom-fields">{(["h","m","s"] as const).map(k=><label key={k}><input aria-label={k+" duration"} value={custom[k]} maxLength={2} inputMode="numeric" max={k==="h"?"20":"59"} placeholder="00" onChange={e=>setCustom({...custom,[k]:e.target.value.replace(/\D/g,"")})}/><span>{k}</span></label>)}</div><button onClick={apply}>Apply duration</button></div>}<div className="side-subject"><span>SUBJECT</span><button className="label-button" onClick={()=>setOpen(v=>!v)}>{label}<span>⌄</span></button>{open&&<div className="label-menu">{["Mathematics","Physics","Chemistry","Computer Science","Biology"].map(x=><button key={x} onClick={()=>{setLabel(x);setOpen(false)}}>{x}</button>)}</div>}</div></aside><div className="timer-center"><section className="clock-card glass-panel"><div className="clock-top"><span className="timer-mode-label">{run?"SESSION ACTIVE":mode.toUpperCase()}</span><span className="clock-status">{Math.round(pct)}% complete</span></div><div className="big-clock">{fmt(left)}</div><div className="clock-bottom"><div className="time-units"><span>HOURS</span><span>MINUTES</span><span>SECONDS</span></div></div><div className="clock-progress"><div style={{width:Math.min(100,Math.max(0,pct))+"%"}}/></div></section><div className="controls"><button className="round-control" aria-label="Reset" onClick={resetTimer}>↺</button><button className="start-button" onClick={toggle}>{run?"Pause":!left&&total?"Restart":"Start session"}</button><button className="round-control save-control" aria-label="Save study progress" onClick={saveNow}>✓</button></div><div className="bottom-tools"><button onClick={()=>document.getElementById("task-list")?.scrollIntoView({behavior:"smooth"})}>Tasks</button><button onClick={saveNow}>Save progress</button><button>Ambient</button><button>Study room</button></div></div><section id="task-list" className="task-panel glass-panel"><div className="task-heading"><div><span className="section-kicker">WORKSPACE / 03</span><h2>Today&apos;s tasks</h2></div><span className="task-count">{done} / {tasks.length} complete</span></div><form className="task-add" onSubmit={e=>{e.preventDefault();addTask()}}><input value={taskText} onChange={e=>setTaskText(e.target.value)} placeholder="Add a study task..." aria-label="Add a study task"/><button type="submit">ADD</button></form><div className="task-items">{tasks.length===0?<div className="task-empty">No tasks yet. Add one above and keep your session focused.</div>:tasks.map(t=><div className={"task-item "+(t.done?"done":"")} key={t.id}><button type="button" className="task-check" aria-label={t.done?"Mark incomplete":"Mark complete"} onClick={()=>setTasks(ts=>ts.map(x=>x.id===t.id?{...x,done:!x.done}:x))}>{t.done?"✓":""}</button><span>{t.text}</span><button type="button" className="task-delete" aria-label="Delete task" onClick={()=>setTasks(ts=>ts.filter(x=>x.id!==t.id))}>×</button></div>)}</div></section></div><div className="timer-meta"><span>25:00 recommended</span><span>Session 01</span><span>Distraction-free</span></div>
- </main>
-}
-function PathwayProgress(){
- const pathways=[
-  {id:"Fool",group:"Lord of Mysteries",god:"The Fool",seq:["Seer","Clown","Magician","Faceless","Marionettist","Bizarro Sorcerer","Scholar of Yore","Miracle Invoker","Attendant of Mysteries","The Fool"]},
-  {id:"Error",group:"Lord of Mysteries",god:"Error",seq:["Marauder","Swindler","Cryptologist","Prometheus","Dream Stealer","Parasite","Mentor of Deceit","Trojan Horse of Destiny","Worm of Time","Error"]},
-  {id:"Door",group:"Lord of Mysteries",god:"The Door",seq:["Apprentice","Trickmaster","Astrologer","Scribe","Traveler","Secrets Sorcerer","Wanderer","Planeswalker","Key of Stars","Door"]},
-  {id:"Visionary",group:"God Almighty",god:"Visionary",seq:["Spectator","Telepathist","Psychiatrist","Hypnotist","Dreamwalker","Manipulator","Dream Weaver","Discerner","Author","Visionary"]},
-  {id:"White Tower",group:"God Almighty",god:"White Tower",seq:["Reader","Student of Ratiocination","Detective","Polymath","Mysticism Magister","Prophet","Cognizer","Wisdom Angel","Omniscient Eye","White Tower"]},
-  {id:"Darkness",group:"Eternal Darkness",god:"Darkness",seq:["Sleepless","Midnight Poet","Nightmare","Soul Assurer","Spirit Warlock","Nightwatcher","Horror Bishop","Servant of Concealment","Knight of Misfortune","Darkness"]},
-  {id:"Death",group:"Eternal Darkness",god:"Death",seq:["Corpse Collector","Gravedigger","Spirit Medium","Spirit Guide","Gatekeeper","Undying","Ferryman","Death Consul","Pale Emperor","Death"]},
-  {id:"Hanged Man",group:"Eternal Darkness",god:"Hanged Man",seq:["Secrets Suppliant","Listener","Shadow Ascetic","Rose Bishop","Shepherd","Black Knight","Trinity Templar","Profane Presbyter","Dark Angel","Hanged Man"]},
-  {id:"Sun",group:"God Almighty",god:"Sun",seq:["Bard","Light Suppliant","Solar High Priest","Notary","Priest of Light","Unshadowed","Justice Mentor","Lightseeker","White Angel","Sun"]}
- ] as const;
- const [data,setData]=useState({seconds:0,sessions:0,daily:{}} as {seconds:number;sessions:number;daily:Record<string,number>;pathway?:string;sequence?:number});
- const [selected,setSelected]=useState<string|null>(null);
- useEffect(()=>{
-   let alive=true;
-   const load=async()=>{
-     try{
-       const local=JSON.parse(localStorage.getItem("study-x-progress")||"{\"seconds\":0,\"sessions\":0,\"daily\":{}}");
-       if(alive&&local.pathway){setData(local);setSelected(local.pathway)}
-       const r=await fetch("/api/sync",{cache:"no-store"});
-       if(r.ok){
-         const x=await r.json(),p=x.data?.progress;
-         if(p){
-           const merged={...local,...p};
-           if(alive){localStorage.setItem("study-x-progress",JSON.stringify(merged));setData(merged);setSelected(merged.pathway||null)}
-         }
-       }
-     }catch{}
-   };
-   load();
-   const id=setInterval(load,5000);
-   return()=>{alive=false;clearInterval(id)}
- },[]);
- async function choose(name:string){if(selected)return;const p={...data,pathway:name,sequence:9};setSelected(name);setData(p);localStorage.setItem("study-x-progress",JSON.stringify(p));try{const r=await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({progress:p})});if(!r.ok)throw new Error("sync failed")}catch{}}
- const active=pathways.find(p=>p.id===selected),currentSeq=Math.max(0,Math.min(9,data.sequence??9)),hours=Math.floor((data.seconds||0)/3600),days=Object.keys(data.daily||{}).length;
- const currentName=active?active.seq[9-currentSeq]:"";
- return <main className="pathways-page"><div className="page-heading"><span className="section-kicker">PROGRESS / PATHWAY</span><h1>Your Pathway</h1><p>One account, one pathway, and a full Sequence ladder. Your progress continues on every device.</p></div>
- <section className="pathway-hero glass-panel"><div><span className="pathway-kicker">CURRENT PATH</span><h2>{active?active.id+" Pathway":"Choose your pathway"}</h2><p>{active?"Current Sequence "+currentSeq+": "+currentName+". Your pathway and Sequence progress are saved to this account.":"Choose one of the nine Pathways. The choice is permanently tied to this account."}</p></div><div className="sequence-core"><span>SEQ.</span><b>{currentSeq}</b><small>{active?currentName.toUpperCase():"START"}</small></div></section>
- {!selected&&<div className="pathway-grid">{pathways.map((p,i)=><article className="pathway-card glass-panel" key={p.id}><div className="pathway-top"><span className="pathway-number">0{i+1}</span><span className="available-badge">AVAILABLE</span></div><h3>{p.id}</h3><strong>{p.group}</strong><p>{p.god} pathway · 10 Sequences</p><button onClick={()=>choose(p.id)} className="pathway-select">Choose pathway</button></article>)}</div>}
- {active&&<section className="sequence-ladder glass-panel"><div className="detail-head"><div><span className="section-kicker">{active.id.toUpperCase()} PATHWAY</span><h2>Sequence Ladder</h2></div><span>10 SEQUENCES</span></div><div className="sequence-list">{active.seq.map((name,i)=>{const n=9-i;return <div key={name} className={"seq-node "+(n===currentSeq?"current ":"")+(n>currentSeq?"locked":"")}><span>SEQ {n}</span><div className="seq-name"><b>{name}</b><small>{n===0?"TRUE GOD":n<=1?"ANGEL":n<=3?"SAINT":"BEYONDER"}</small></div><strong>{n===currentSeq?"CURRENT":n<currentSeq?"COMPLETED":"LOCKED"}</strong></div>})}</div></section>}
- <div className="sequence-road glass-panel"><div><span className="section-kicker">YOUR PROGRESS</span><h2>{active?"Sequence "+currentSeq+" · "+currentName:"Choose a Pathway"}</h2><p>{hours} hours studied · {data.sessions||0} sessions · {days} active days</p></div><small>Higher Sequences require progressively harder milestones and challenges. Your current Sequence is stored with your account.</small></div></main>
-}
 function Syllabus(){
  const [tab,setTab]=useState<"HSC"|"MHT-CET">("HSC");
  const hsc={
@@ -252,133 +67,19 @@ function LoginPanel({onClose}:{onClose:()=>void}){const [user,setUser]=useState(
 
 function Progress(){
   const pathways=[{id:"Fool",seq:["Seer","Clown","Magician","Faceless","Marionettist","Bizarro Sorcerer","Scholar of Yore","Miracle Invoker","Attendant of Mysteries","The Fool"]},{id:"Door",seq:["Apprentice","Trickmaster","Astrologer","Scribe","Traveler","Secrets Sorcerer","Wanderer","Planeswalker","Key of Stars","Door"]},{id:"Error",seq:["Marauder","Swindler","Cryptologist","Prometheus","Dream Stealer","Parasite","Mentor of Deceit","Trojan Horse of Destiny","Worm of Time","Error"]},{id:"Visionary",seq:["Spectator","Telepathist","Psychiatrist","Hypnotist","Dreamwalker","Manipulator","Dream Weaver","Discerner","Author","Visionary"]},{id:"Sun",seq:["Bard","Light Suppliant","Solar High Priest","Notary","Priest of Light","Unshadowed","Justice Mentor","Lightseeker","White Angel","Sun"]},{id:"Tyrant",seq:["Sailor","Seafarer","Folk of Rage","Sea King","Cataclysmic Interrer","Calamity Priest","Thunder God","Sea God","Lord of Storms","Tyrant"]},{id:"White Tower",seq:["Reader","Student of Ratiocination","Detective","Polymath","Mysticism Magister","Prophet","Cognizer","Wisdom Angel","Omniscient Eye","White Tower"]},{id:"Darkness",seq:["Sleepless","Midnight Poet","Nightmare","Soul Assurer","Spirit Warlock","Nightwatcher","Horror Bishop","Servant of Concealment","Knight of Misfortune","Darkness"]},{id:"Death",seq:["Corpse Collector","Gravedigger","Spirit Medium","Spirit Guide","Gatekeeper","Undying","Ferryman","Death Consul","Pale Emperor","Death"]}];
-  const [seconds,setSeconds]=useState(0);
-  const [sessions,setSessions]=useState(0);
-  const [tasks,setTasks]=useState<{id:number;text:string;done:boolean}[]>([]);
-  const [taskText,setTaskText]=useState("");
-  const [selected,setSelected]=useState<string|null>(null);
-  const [showPicker,setShowPicker]=useState(false);
-  const active=pathways.find(p=>p.id===selected);
-
-  useEffect(()=>{
-    let alive=true;
-    const load=async()=>{
-      try{
-        const local=JSON.parse(localStorage.getItem("study-x-progress")||"{}");
-        if(alive){setSeconds(local.seconds||0);setSessions(local.sessions||0);setSelected(local.pathway||null);}
-        const saved=JSON.parse(localStorage.getItem("study-x-tasks")||"[]");
-        if(alive&&Array.isArray(saved))setTasks(saved);
-        const a=await fetch("/api/auth",{cache:"no-store"});
-        if((await a.json()).loggedIn){
-          const r=await fetch("/api/sync",{cache:"no-store"});
-          if(r.ok){
-            const x=await r.json();
-            if(x.data?.progress){
-              const merged={...local,...x.data.progress};
-              localStorage.setItem("study-x-progress",JSON.stringify(merged));
-              if(alive){setSeconds(merged.seconds||0);setSessions(merged.sessions||0);setSelected(merged.pathway||null);}
-            }
-            if(Array.isArray(x.data?.tasks)){localStorage.setItem("study-x-tasks",JSON.stringify(x.data.tasks));if(alive)setTasks(x.data.tasks);}
-          }
-        }
-      }catch{}
-    };
-    load();
-    const id=setInterval(load,5000);
-    return()=>{alive=false;clearInterval(id)};
-  },[]);
-
-  const saveTasks=async(next:{id:number;text:string;done:boolean}[])=>{
-    setTasks(next);
-    localStorage.setItem("study-x-tasks",JSON.stringify(next));
-    try{
-      const a=await fetch("/api/auth",{cache:"no-store"});
-      if(!(await a.json()).loggedIn)return;
-      const progress=JSON.parse(localStorage.getItem("study-x-progress")||"{}");
-      await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({progress,tasks:next})});
-    }catch{}
-  };
-
-  const addTask=()=>{
-    const value=taskText.trim();
-    if(!value)return;
-    saveTasks([...tasks,{id:Date.now(),text:value,done:false}]);
-    setTaskText("");
-  };
-
-  const choosePath=(name:string)=>{
-    try{
-      const d=JSON.parse(localStorage.getItem("study-x-progress")||"{}");
-      d.pathway=name;
-      d.sequence=d.sequence??9;
-      localStorage.setItem("study-x-progress",JSON.stringify(d));
-      setSelected(name);
-      setShowPicker(false);
-      void (async()=>{
-        try{
-          const a=await fetch("/api/auth",{cache:"no-store"});
-          if(!(await a.json()).loggedIn)return;
-          await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({progress:d})});
-        }catch{}
-      })();
-    }catch{}
-  };
-
-  const hours=seconds/3600;
-  const wholeHours=Math.floor(hours);
-  const mins=Math.floor((seconds%3600)/60);
-  const display=wholeHours>0?wholeHours+"h "+mins+"m":mins>0?mins+"m":Math.floor(seconds)+"s";
-  const sequence=selected?9:9;
-  const thresholds=[0,20,45,80,125,185,260,350,460,600];
-  const current=thresholds[9-sequence]||0;
-  const next=thresholds[10-sequence]||20;
-  const levelProgress=Math.min(100,Math.max(0,(hours-current)/(next-current)*100));
-  const done=tasks.filter(t=>t.done).length;
-  const goal=Math.min(100,seconds/14400*100);
-
-  return (
-    <main className="progress-page">
-      <div className="progress-heading">
-        <div><span className="section-kicker">PROGRESS / 02</span><h1>Your study progress.</h1><p>Choose a pathway, complete difficult challenges, and earn every sequence.</p></div>
-        <div className="progress-live"><i/> LIVE TRACKING</div>
-      </div>
-      {!selected ? (
-        <section className="pathway-select glass-panel">
-          <div className="detail-head"><div><span className="section-kicker">BEGIN YOUR JOURNEY</span><h2>Choose your pathway.</h2><p>Pick one route. Your progression stays tied to it.</p></div><span>09 PATHWAYS</span></div>
-          <div className="pathway-choice-grid">
-            {pathways.map((p,i)=><button className="pathway-choice" key={p.id} onClick={()=>choosePath(p.id)}><small>PATHWAY {String(i+1).padStart(2,"0")}</small><strong>{p.id}</strong><span>{p.seq[0]} route</span><b>BEGIN AT SEQ. 9 →</b></button>)}
-          </div>
-        </section>
-      ) : (
-        <>
-          <section className="progress-hero glass-panel"><div><span className="progress-label">TOTAL STUDY TIME / {selected.toUpperCase()}</span><strong>{display}</strong><p>You have studied for <b>{wholeHours} hour{wholeHours===1?"":"s"}</b>. Current rank: <b>Sequence {sequence}</b>.</p></div><div className="progress-orb"><span>SEQ {sequence}</span><small>{Math.round(levelProgress)}% to next</small></div></section>
-          <section className="sequence-panel glass-panel">
-            <div className="detail-head"><div><span className="section-kicker">PATHWAY / {selected.toUpperCase()}</span><h2>Sequence progression</h2><p>Advancement gets harder at every step.</p></div><button className="switch-path-btn" onClick={()=>setShowPicker(v=>!v)}>SWITCH PATHWAY</button></div>
-            <div className="sequence-ladder">{[9,8,7,6,5,4,3,2,1,0].map(seq=><div className={"seq-node "+(seq===sequence?"current":"locked")} key={seq}><span>SEQ {seq}</span><div><b>{(active?.seq?.[9-seq]||"")}</b><small>{seq===sequence?"CURRENT":"LOCKED"} · {thresholds[9-seq]||0}h required</small></div><strong>{seq===sequence?"ACTIVE":"LOCKED"}</strong></div>)}</div>
-            <div className="sequence-goal"><div><span>NEXT ADVANCEMENT</span><b>{Math.max(0,Math.ceil(next-hours))} hours remaining</b><small>Requires sustained study plus pathway challenges.</small></div><div className="goal-track"><i style={{width:levelProgress+"%"}}/></div></div>
-          </section>
-          {showPicker&&<section className="pathway-select glass-panel"><div className="detail-head"><div><span className="section-kicker">PATHWAY CONTROL</span><h2>Choose another route.</h2></div></div><div className="pathway-choice-grid compact">{pathways.map(p=><button className={"pathway-choice "+(p.id===selected?"selected":"")} key={p.id} onClick={()=>p.id!==selected&&choosePath(p.id)}><small>PATHWAY</small><strong>{p.id}</strong><span>{p.seq[0]} route</span></button>)}</div></section>}
-        </>
-      )}
-      <div className="progress-stats"><article className="glass-panel"><span>HOURS STUDIED</span><b>{wholeHours}</b><small>total focused hours</small></article><article className="glass-panel"><span>FOCUSED MINUTES</span><b>{Math.floor(seconds/60).toLocaleString()}</b><small>minutes accumulated</small></article><article className="glass-panel"><span>SESSIONS</span><b>{sessions}</b><small>completed sessions</small></article></div>
-      <div className="progress-work-grid">
-        <section className="progress-tasks glass-panel"><div className="detail-head"><div><span className="section-kicker">WORKSPACE / TASKS</span><h2>Today&apos;s tasks</h2></div><span>{done}/{tasks.length}</span></div><form className="task-add" onSubmit={e=>{e.preventDefault();addTask()}}><input value={taskText} onChange={e=>setTaskText(e.target.value)} placeholder="Add a study task..." aria-label="Add a study task"/><button type="submit">ADD</button></form><div className="task-items">{tasks.length===0?<div className="task-empty">Add tasks here and tick them off as you study.</div>:tasks.map(t=><div className={"task-item "+(t.done?"done":"")} key={t.id}><button type="button" className="task-check" onClick={()=>saveTasks(tasks.map(x=>x.id===t.id?{...x,done:!x.done}:x))}>{t.done?"✓":""}</button><span>{t.text}</span><button type="button" className="task-delete" onClick={()=>saveTasks(tasks.filter(x=>x.id!==t.id))}>×</button></div>)}</div></section>
-        <section className="progress-detail glass-panel"><div className="detail-head"><div><span className="section-kicker">CONSISTENCY</span><h2>Daily goal</h2></div><span>{Math.round(goal)}% of 4h goal</span></div><div className="big-progress-track"><div style={{width:goal+"%"}}/></div><div className="detail-foot"><span>0h</span><b>{display}</b><span>4h</span></div></section>
-      </div>
-    </main>
-  );
+  const [seconds,setSeconds]=useState(0);const [sessions,setSessions]=useState(0);const [tasks,setTasks]=useState<{id:number;text:string;done:boolean}[]>([]);const [taskText,setTaskText]=useState("");const [selected,setSelected]=useState<string|null>(null);const [showPicker,setShowPicker]=useState(false);const active=pathways.find(p=>p.id===selected);
+  useEffect(()=>{let alive=true;const load=async()=>{try{const local=JSON.parse(localStorage.getItem("study-x-progress")||"{}");if(alive){setSeconds(local.seconds||0);setSessions(local.sessions||0);setSelected(local.pathway||null)}const saved=JSON.parse(localStorage.getItem("study-x-tasks")||"[]");if(alive&&Array.isArray(saved))setTasks(saved);const a=await fetch("/api/auth",{cache:"no-store"});if((await a.json()).loggedIn){const r=await fetch("/api/sync",{cache:"no-store"});if(r.ok){const x=await r.json();if(x.data?.progress){const merged={...local,...x.data.progress};localStorage.setItem("study-x-progress",JSON.stringify(merged));if(alive){setSeconds(merged.seconds||0);setSessions(merged.sessions||0);setSelected(merged.pathway||null)}}if(Array.isArray(x.data?.tasks)){localStorage.setItem("study-x-tasks",JSON.stringify(x.data.tasks));if(alive)setTasks(x.data.tasks)}}}}catch{}};load();const id=setInterval(load,5000);return()=>{alive=false;clearInterval(id)}},[]);
+  const saveTasks=async(next:{id:number;text:string;done:boolean}[])=>{setTasks(next);localStorage.setItem("study-x-tasks",JSON.stringify(next));try{const a=await fetch("/api/auth",{cache:"no-store"});if(!(await a.json()).loggedIn)return;const progress=JSON.parse(localStorage.getItem("study-x-progress")||"{}");await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({progress,tasks:next})})}catch{}};
+  const addTask=()=>{const value=taskText.trim();if(!value)return;saveTasks([...tasks,{id:Date.now(),text:value,done:false}]);setTaskText("")};
+  const choosePath=(name:string)=>{try{const d=JSON.parse(localStorage.getItem("study-x-progress")||"{}");d.pathway=name;d.sequence=d.sequence??9;localStorage.setItem("study-x-progress",JSON.stringify(d));setSelected(name);setShowPicker(false);void (async()=>{try{const a=await fetch("/api/auth",{cache:"no-store"});if(!(await a.json()).loggedIn)return;await fetch("/api/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({progress:d})})}catch{}})()}catch{}};
+  const hours=seconds/3600,wholeHours=Math.floor(hours),mins=Math.floor((seconds%3600)/60),display=wholeHours>0?wholeHours+"h "+mins+"m":mins>0?mins+"m":Math.floor(seconds)+"s";const sequence=9;const thresholds=[0,20,45,80,125,185,260,350,460,600];const current=thresholds[9-sequence]||0;const next=thresholds[10-sequence]||20;const levelProgress=Math.min(100,Math.max(0,(hours-current)/(next-current)*100));const done=tasks.filter(t=>t.done).length;const goal=Math.min(100,seconds/14400*100);
+  return <main className="progress-page"><div className="progress-heading"><div><span className="section-kicker">PROGRESS / 02</span><h1>Your study progress.</h1><p>Choose a pathway, complete difficult challenges, and earn every sequence.</p></div><div className="progress-live"><i/> LIVE TRACKING</div></div>{!selected?<section className="pathway-select glass-panel"><div className="detail-head"><div><span className="section-kicker">BEGIN YOUR JOURNEY</span><h2>Choose your pathway.</h2><p>Pick one route. Your progression stays tied to it.</p></div><span>09 PATHWAYS</span></div><div className="pathway-choice-grid">{pathways.map((p,i)=><button className="pathway-choice" key={p.id} onClick={()=>choosePath(p.id)}><small>PATHWAY {String(i+1).padStart(2,"0")}</small><strong>{p.id}</strong><span>{p.seq[0]} route</span><b>BEGIN AT SEQ. 9 →</b></button>)}</div></section>:<><section className="progress-hero glass-panel"><div><span className="progress-label">TOTAL STUDY TIME / {selected.toUpperCase()}</span><strong>{display}</strong><p>You have studied for <b>{wholeHours} hour{wholeHours===1?"":"s"}</b>. Current rank: <b>Sequence {sequence}</b>.</p></div><div className="progress-orb"><span>SEQ {sequence}</span><small>{Math.round(levelProgress)}% to next</small></div></section><section className="sequence-panel glass-panel"><div className="detail-head"><div><span className="section-kicker">PATHWAY / {selected.toUpperCase()}</span><h2>Sequence progression</h2><p>Advancement gets harder at every step.</p></div><button className="switch-path-btn" onClick={()=>setShowPicker(v=>!v)}>SWITCH PATHWAY</button></div><div className="sequence-ladder">{[9,8,7,6,5,4,3,2,1,0].map(seq=><div className={"seq-node "+(seq===sequence?"current":"locked")} key={seq}><span>SEQ {seq}</span><div><b>{(active?.seq?.[9-seq]||"")}</b><small>{seq===sequence?"CURRENT":"LOCKED"} · {thresholds[9-seq]||0}h required</small></div><strong>{seq===sequence?"ACTIVE":"LOCKED"}</strong></div>)}</div><div className="sequence-goal"><div><span>NEXT ADVANCEMENT</span><b>{Math.max(0,Math.ceil(next-hours))} hours remaining</b><small>Requires sustained study plus pathway challenges.</small></div><div className="goal-track"><i style={{width:levelProgress+"%"}}/></div></div></section>{showPicker&&<section className="pathway-select glass-panel"><div className="detail-head"><div><span className="section-kicker">PATHWAY CONTROL</span><h2>Choose another route.</h2></div></div><div className="pathway-choice-grid compact">{pathways.map(p=><button className={"pathway-choice "+(p.id===selected?"selected":"")} key={p.id} onClick={()=>p.id!==selected&&choosePath(p.id)}><small>PATHWAY</small><strong>{p.id}</strong><span>{p.seq[0]} route</span></button>)}</div></section>}</>}<div className="progress-stats"><article className="glass-panel"><span>HOURS STUDIED</span><b>{wholeHours}</b><small>total focused hours</small></article><article className="glass-panel"><span>FOCUSED MINUTES</span><b>{Math.floor(seconds/60).toLocaleString()}</b><small>minutes accumulated</small></article><article className="glass-panel"><span>SESSIONS</span><b>{sessions}</b><small>completed sessions</small></article></div><div className="progress-work-grid"><section className="progress-tasks glass-panel"><div className="detail-head"><div><span className="section-kicker">WORKSPACE / TASKS</span><h2>Today&apos;s tasks</h2></div><span>{done}/{tasks.length}</span></div><form className="task-add" onSubmit={e=>{e.preventDefault();addTask()}}><input value={taskText} onChange={e=>setTaskText(e.target.value)} placeholder="Add a study task..." aria-label="Add a study task"/><button type="submit">ADD</button></form><div className="task-items">{tasks.length===0?<div className="task-empty">Add tasks here and tick them off as you study.</div>:tasks.map(t=><div className={"task-item "+(t.done?"done":"")} key={t.id}><button type="button" className="task-check" onClick={()=>saveTasks(tasks.map(x=>x.id===t.id?{...x,done:!x.done}:x))}>{t.done?"✓":""}</button><span>{t.text}</span><button type="button" className="task-delete" onClick={()=>saveTasks(tasks.filter(x=>x.id!==t.id))}>×</button></div>)}</div></section><section className="progress-detail glass-panel"><div className="detail-head"><div><span className="section-kicker">CONSISTENCY</span><h2>Daily goal</h2></div><span>{Math.round(goal)}% of 4h goal</span></div><div className="big-progress-track"><div style={{width:goal+"%"}}/></div><div className="detail-foot"><span>0h</span><b>{display}</b><span>4h</span></div></section></div></main>;
 }
 
-
-function Leaderboard(){
- const [rows,setRows]=useState<{username:string;seconds:number}[]>([]);
- const [loading,setLoading]=useState(true);
- useEffect(()=>{const load=()=>fetch("/api/leaderboard",{cache:"no-store"}).then(r=>r.json()).then(x=>setRows(Array.isArray(x.rows)?x.rows:[])).catch(()=>setRows([])).finally(()=>setLoading(false));load();const id=setInterval(load,3000);return()=>clearInterval(id)},[]);
- const fmtTime=(s:number)=>{const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h+"h "+m+"m"};
- return <main className="progress-page leaderboard-page"><div className="progress-heading"><div><span className="section-kicker">LEADERBOARD / 04</span><h1>Study together. Rise together.</h1><p>Public study time rankings from registered Study X users.</p></div><div className="progress-live"><i/> LIVE RANKINGS</div></div><section className="leaderboard-panel glass-panel"><div className="detail-head"><div><span className="section-kicker">GLOBAL</span><h2>Top scholars</h2></div><span>{rows.length} USERS</span></div>{loading?<div className="leaderboard-empty">Loading rankings...</div>:rows.length===0?<div className="leaderboard-empty">No study data yet. Complete a session to enter the leaderboard.</div>:<div className="leaderboard-list">{rows.map((r,i)=><div className={"leader-row "+(i<3?"top-rank":"")} key={r.username}><strong>#{i+1}</strong><div><b>@{r.username}</b><small>FOCUSED STUDY TIME</small></div><span>{fmtTime(r.seconds)}</span></div>)}</div>}</section></main>
-}
+function Leaderboard(){const [rows,setRows]=useState<{username:string;seconds:number}[]>([]);const [loading,setLoading]=useState(true);useEffect(()=>{const load=()=>fetch("/api/leaderboard",{cache:"no-store"}).then(r=>r.json()).then(x=>setRows(Array.isArray(x.rows)?x.rows:[])).catch(()=>setRows([])).finally(()=>setLoading(false));load();const id=setInterval(load,3000);return()=>clearInterval(id)},[]);const fmtTime=(s:number)=>{const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h+"h "+m+"m"};return <main className="progress-page leaderboard-page"><div className="progress-heading"><div><span className="section-kicker">LEADERBOARD / 04</span><h1>Study together. Rise together.</h1><p>Public study time rankings from registered Study X users.</p></div><div className="progress-live"><i/> LIVE RANKINGS</div></div><section className="leaderboard-panel glass-panel"><div className="detail-head"><div><span className="section-kicker">GLOBAL</span><h2>Top scholars</h2></div><span>{rows.length} USERS</span></div>{loading?<div className="leaderboard-empty">Loading rankings...</div>:rows.length===0?<div className="leaderboard-empty">No study data yet. Complete a session to enter the leaderboard.</div>:<div className="leaderboard-list">{rows.map((r,i)=><div className={"leader-row "+(i<3?"top-rank":"")} key={r.username}><strong>#{i+1}</strong><div><b>@{r.username}</b><small>FOCUSED STUDY TIME</small></div><span>{fmtTime(r.seconds)}</span></div>)}</div>}</section></main>}
 
 function LoginPage(){const [u,setU]=useState(""),[p,setP]=useState(""),[err,setErr]=useState(""),[busy,setBusy]=useState(false),router=useRouter();async function login(){setBusy(true);setErr("");try{const r=await fetch("/api/auth",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u,password:p})});const x=await r.json();if(!r.ok)throw new Error(x.error||"Login failed");router.replace("/timer")}catch(e){setErr(e instanceof Error?e.message:"Login failed")}finally{setBusy(false)}}return <main className="login-page"><div className="login-card glass-panel"><div className="brand login-brand"><span className="brand-mark">SX</span><b>Study<span> X</span></b></div><span className="section-kicker">PRIVATE STUDY SPACE</span><h1>Welcome back.</h1><p>Log in to access your timer, tasks, progress and leaderboard.</p><input value={u} onChange={e=>setU(e.target.value)} placeholder="Username" autoComplete="username"/><input value={p} onChange={e=>setP(e.target.value)} placeholder="Password" type="password" autoComplete="current-password" onKeyDown={e=>e.key==="Enter"&&login()}/>{err&&<div className="login-error">{err}</div>}<button className="login-submit" onClick={login} disabled={busy}>{busy?"Signing in…":"Sign in"}</button></div></main>}
+
 export default function Page(){
  const path=usePathname(),[loginOpen,setLoginOpen]=useState(false),[account,setAccount]=useState<string|null>(null);
  const initial=path==="/progress"?"Progress":path==="/syllabus"?"Syllabus":path==="/leaderboard"?"Leaderboard":path==="/achievements"?"Achievements":"Timer";
@@ -386,7 +87,5 @@ export default function Page(){
  useEffect(()=>{const f=()=>fetch("/api/auth").then(r=>r.json()).then(x=>setAccount(x.loggedIn?x.username:null)).catch(()=>{});f();window.addEventListener("studyx-login",f);window.addEventListener("studyx-logout",f);return()=>{window.removeEventListener("studyx-login",f);window.removeEventListener("studyx-logout",f)}},[]);
  const nav=["Timer","Progress","Syllabus","Leaderboard"];
  const views:Record<string,React.ReactNode>={Timer:<Timer/>,Progress:<Progress/>,Syllabus:<Syllabus/>,Leaderboard:<Leaderboard/>,Achievements:<Achievements/>};
- return <div className="study-x-app"><div className="grain"/><div className="ambient-glow"/>
- <nav className="top-nav"><button className="brand" onClick={()=>setActiveTab("Timer")}><span className="brand-mark">SX</span><b>Study<span> X</span></b></button><div className="nav-pill glass-pill">{nav.map(n=><button key={n} onClick={()=>setActiveTab(n)} className={activeTab===n?"active-pill":""}>{n}</button>)}</div><div className="nav-right"><button className="nav-action" aria-label="Notifications">•••</button><button className="login-nav" onClick={()=>setLoginOpen(true)}>{account?"@"+account:"Login"}</button></div></nav>
- <div className="content">{views[activeTab]}</div>{loginOpen&&<LoginPanel onClose={()=>setLoginOpen(false)}/>}<div className="status-bar"><span><i/> Systems normal</span><span>Study X · 2026</span></div></div>
+ return <div className="study-x-app"><div className="grain"/><div className="ambient-glow"/><nav className="top-nav"><button className="brand" onClick={()=>setActiveTab("Timer")}><span className="brand-mark">SX</span><b>Study<span> X</span></b></button><div className="nav-pill glass-pill">{nav.map(n=><button key={n} onClick={()=>setActiveTab(n)} className={activeTab===n?"active-pill":""}>{n}</button>)}</div><div className="nav-right"><button className="nav-action" aria-label="Notifications">•••</button><button className="login-nav" onClick={()=>setLoginOpen(true)}>{account?"@"+account:"Login"}</button></div></nav><div className="content">{views[activeTab]}</div>{loginOpen&&<LoginPanel onClose={()=>setLoginOpen(false)}/>}<div className="status-bar"><span><i/> Systems normal</span><span>Study X · 2026</span></div></div>
 }
